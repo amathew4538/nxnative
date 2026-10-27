@@ -72,15 +72,16 @@ def table_head(lib):   # the header c1_full.tsv / cb_extent.tsv start with: the 
 def sha16(p): return hashlib.sha256(open(p, 'rb').read()).hexdigest()[:16]
 
 def tools_now():
-    """Actual tool fingerprints: translator dll (including the Ryujinx shader library), spirv-cross, metal compiler (macOS / iOS)"""
+    """Actual tool fingerprints: translator dll (including the Ryujinx shader library) and spirv-cross.
+
+    Mac shaders are compiled from MSL at runtime, so the installed macOS Metal
+    toolchain is deliberately not part of the translation chain.
+    """
     t = {}
     for dll in ('dmsh_xlate.dll', 'Ryujinx.Graphics.Shader.dll', 'Ryujinx.Common.dll'): t[dll] = sha16(os.path.join(XLATE_DIR, dll))
     t['xlate_source'] = subprocess.run([os.path.join(XLATE_DIR, 'dmsh_xlate'), '--source-sha'], capture_output=True, text=True).stdout.strip()
     sc = shutil.which(SPIRV_CROSS)
     t['spirv-cross'] = sha16(sc) if sc else 'missing'
-    for sdk in ('macosx', 'iphoneos'):
-        t['metal_' + sdk] = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True).stdout.splitlines()[0:1] or ['missing']
-        t['metal_' + sdk] = t['metal_' + sdk][0]
     return t
 
 def xlate_source_sha():   # same convention as dmsh_xlate --source-sha: the embedded Program.cs and csproj concatenated in that order
