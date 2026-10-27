@@ -191,6 +191,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host reports add-on content from `DM_AOC_DIR`, one numbered folder per DLC index (title ID − base − 0x1000) holding that DLC's RomFS. `build_ipa_from_nsp.py` extracts the DLC NSPs in the folder with `nx_extract --aoc`, `build_ipa.sh` copies them to `<App>/aoc/`, and the app sets `DM_AOC_DIR`. `aoc::CountAddOnContent` / `ListAddOnContent` report those indices (`hle_misc.c`), and `fs::MountAddOnContent` mounts the folder read-only (`hle_fs.c`). D2R keeps its fixed `{1}` without `DM_AOC_DIR`; `DM_AOC_OWNED=0` reports none.
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): its two DLC packages each hold one empty marker file (`e0`, `h0`), and the content is already in update 2.0.0. `DLCManager.RefreshHasList` marks a content owned when its mount succeeded (probe `main+0x29f3c88`).
 
+### Owned add-on content lists beyond 64 entries
+
+- **Symptom:** some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents.
+- **Cause:** `hle_misc.c` stored only 64 indices and stopped reading `DM_AOC_DIR` when that array filled, before sorting. The omitted indices depended on directory order; its 256-byte log buffer also truncated longer lists.
+- **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
+- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
+
 ### Add-on content mount cache sized as RomFS working memory
 
 - **Symptom:** SIGSEGV in `crypto::detail::CbcModeAes128Helper::DecryptBlocks` with a null destination (`main+0x8737e8`, right after `aoc:` is mounted).
@@ -586,7 +594,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** SDK calls that reach the time service, each aborting in `sm::Initialize` (or found in the imports before they were met).
 - **Fix:**
   - `time::StandardSteadyClock::GetCurrentTimePoint`: host monotonic seconds, fixed source ID; `GetSpanBetween` runs in `sdk` ([The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0, SDK 20.5.22).
-  - `time::ClockSnapshot::CreateWithStandardSystemClock`: 0xD0 bytes, filled on the host from the steady clock, the user clock and the calendar; the network fields stay 0 ([The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3).
+  - `time::ClockSnapshot::CreateWithStandardSystemClock` and `CreateWithAdjustableSystemClock`: 0xD0 bytes, filled on the host from the steady clock, the user clock and the calendar; the network fields stay 0. The type byte at `+0xcd` is 1 for standard and 2 for adjustable snapshots (0 means uninitialized), as verified in [Tears of the Kingdom's SDK](../../dm/games/0100F2C0115B6000/README.md#services). The adjustable entry also dereferences the absent time-service session without a host take-over. `t_time` checks both registrations, guarded buffers, the adjustable calendar and location, and snapshot arithmetic. The adjustable crash and boot fix were reported for Tomodachi Life: Living the Dream in [PR #385](https://github.com/seedds/nxnative/pull/385); that gameplay report has not been repeated here.
   - The adjustable user clock (`time::AdjustableUserSystemClock::GetCurrentTime`, which the game's days follow) reads the time service's shared memory in the SDK (`MonotonicSystemClock::GetCurrentTime`, `sdk+0x4421cc`), which the host never maps, so it is the host's clock, as the user clock; `time::GetStandardSteadyClockCurrentTimePoint`, the free-function form of the steady clock ([Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) SDK 20.5.4, found in `main`'s imports before the first boot).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md).
 
