@@ -5,7 +5,7 @@
 # Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is actually written to <output cache dir>/b-<chain version>/ (same for IOSOUT), for the chain version see dmsh_chain.py.
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
 # from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
-# Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
+# Build output: <key>_b.metal, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2). Mac hosts compile the MSL at runtime; IOSOUT also gets a .metallib.
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
 import ast, inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
@@ -47,14 +47,25 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
-MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
-# The outer shader and fetch-variant caches restore compiled libraries directly,
-# before the MSL compile cache can check their compiler. Keep override builds separate there too.
-METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
-def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
-    subprocess.run([*MAC_METAL, msl, '-o', air], check=True)
-    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
+MAC_RECORD = 'MTLDevice.newLibraryWithSource (runtime)'
+# The Mac output is source-only. The iOS compiler identity still keys its offline cache.
+METAL_FP = 'runtime-source' + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
+class RuntimeMetal:
+    """The Mac target is source-only; Metal compiles it inside the host."""
+    def compile(self, target, msl, lib):
+        if target == 'ios':
+            return self.ios.compile(msl, msl[:-6] + '.ios.air', lib)
+
+    def with_compiler(self, target, refl):
+        if target == 'mac':
+            return dict(refl, chain_metal=MAC_RECORD, chain_compiler='runtime')
+        return self.ios.with_compiler(target, refl)
+
+    def fill(self, *args):
+        return []
+
+    def summary(self):
+        return 'Metal cache: mac runtime source compilation' + (f'; {self.ios.summary()}' if hasattr(self, 'ios') else '')
 # The NVN driver's constant segments have one layout in every game (NVN 53 and 55 drivers, SDK 6 to 21: the handles of every shader of every profile fit it); nvn_mtl.m fills them the same way at run time.
 #   c2 0x20 + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
 #     image table (Hades II binds slot 34, at 0x130, and no image), so a texture instruction's handle anywhere below the separate texture table names a combined slot. In the image
@@ -120,13 +131,13 @@ def cache_path(digest): return os.path.join(CAS, 'shader', digest)
 def cache_outputs(key, digest, cached=False):
     root = cache_path(digest); files = {}
     for label, directory, names in (
-            ('mac', out, [key + '_b.metallib', key + '_b.metal', key + '_b.json']),
+            ('mac', out, [key + '_b.metal', key + '_b.json']),
             ('ios', IOSOUT, [key + '_b.metallib', key + '_b.json'])):
         if not directory: continue
         base = os.path.join(root, label) if cached else directory
         names += [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv') for ext in ('.metallib', '.json', '.metal') if label == 'mac' or ext != '.metal']
         found = [n for n in names if os.path.exists(os.path.join(base, n))]
-        if key + '_b.metallib' not in found or key + '_b.json' not in found: return None
+        if key + '_b.metal' not in found or key + '_b.json' not in found: return None
         files[label] = found
     return root, files
 
@@ -222,22 +233,19 @@ def fetch_finish(key, src, refl):
             if not bf_cache_restore(key, digest, fmeta, fmsl):
                 BF_STATS['miss'] += 1
                 open(fmsl, 'w').write(fv)
-                fair = fmsl[:-6] + '.air'; flib = os.path.join(out, key + '_bf.metallib')
+                flib = os.path.join(out, key + '_bf.metallib'); ilib = None
                 try:
-                    tmp_flib = flib + '.tmp-' + str(os.getpid())
-                    mac_compile(fmsl, fair, tmp_flib)
-                    os.replace(tmp_flib, flib)
-                    ilib = None
                     if IOSOUT:
                         ilib = os.path.join(IOSOUT, key + '_bf.metallib')
                         ios_metal.compile(fmsl, fmsl[:-6] + '.ios.air', ilib + '.tmp')
                         os.replace(ilib + '.tmp', ilib)
-                except subprocess.CalledProcessError:
+                except (subprocess.CalledProcessError, FileNotFoundError):
                     return refl
                 BF_STATS['compile'] += 1
-                bf_cache_publish(digest, fmsl, flib, ilib, fmeta)
+                if os.path.exists(flib):
+                    bf_cache_publish(digest, fmsl, flib, ilib, fmeta)
         finally:
-            for path in (fmsl, fmsl[:-6] + '.air', fmsl[:-6] + '.ios.air'):
+            for path in (fmsl[:-6] + '.air', fmsl[:-6] + '.ios.air'):
                 try: os.unlink(path)
                 except FileNotFoundError: pass
     refl['fetch'] = fmeta
@@ -271,8 +279,11 @@ def pull_finish(key, full, refl):
         PULL_STATS['failed'] += 1; print(f'[RED] {key}: the pulling library does not compile ({str(e)[:120]}): its pipelines are always built for the draw\'s vertex layout', flush=True)
         drop(); return refl
     finally:
-        try: os.unlink(msl)
-        except FileNotFoundError: pass
+        if not os.path.exists(libs[0]):
+            clone(msl, os.path.join(out, key + '_bp.metal'))
+        if os.path.exists(libs[0]) or IOSOUT:
+            try: os.unlink(msl)
+            except FileNotFoundError: pass
     PULL_STATS['generated'] += 1
     refl['pull'] = {k: v_ for k, v_ in info.items() if v_ is not None}
     return refl
@@ -300,8 +311,11 @@ def vin_finish(key, full, refl):
         VIN_STATS['failed'] += 1; print(f'[RED] {key}: the shadow-input library does not compile ({str(e)[:120]}): its integer inputs keep the CPU conversion', flush=True)
         drop(); return refl
     finally:
-        try: os.unlink(msl)
-        except FileNotFoundError: pass
+        if not os.path.exists(libs[0]):
+            clone(msl, os.path.join(out, key + '_bv.metal'))
+        if os.path.exists(libs[0]) or IOSOUT:
+            try: os.unlink(msl)
+            except FileNotFoundError: pass
     refl['vin'] = {'entry': 'main0', 'entry_z': 'main0_z', 'shadow': shadows}
     VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
     return refl
@@ -974,7 +988,11 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
         if _m and (not want or _m.group(1) in want): os.unlink(os.path.join(_d, _n))
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+if IOSOUT:
+    MTL = RuntimeMetal()
+    MTL.ios = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)}, w)
+else:
+    MTL = RuntimeMetal()
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
