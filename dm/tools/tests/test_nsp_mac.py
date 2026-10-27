@@ -37,7 +37,8 @@ class Base(unittest.TestCase):
         elif tool == 'own_compilers.py':   # a full dmsh_build.py run: the libraries, their stamp, and the profile's tables naming it
             outs = [self.sh / 'cache'] + ([Path(env['IOSOUT'])] if 'IOSOUT' in env else [])
             for o in outs:
-                (o / f'b-{CHAIN}').mkdir(parents=True, exist_ok=True); (o / f'b-{CHAIN}' / 'k_b.metallib').write_bytes(b'lib')
+                (o / f'b-{CHAIN}').mkdir(parents=True, exist_ok=True)
+                (o / f'b-{CHAIN}' / 'k_b.metal' if o == self.sh / 'cache' else o / f'b-{CHAIN}' / 'k_b.metallib').write_bytes(b'lib')
                 (o / f'b-{CHAIN}' / 'inputs.tsv').write_text(f'# stamp\ngame\t0100535012974000\ninputs\t{INPUTS}\n')
             for n in ('c1_full.tsv', 'cb_extent.tsv'): (self.tmp / n).write_text(f'# chain b-{CHAIN} inputs {INPUTS} 2026-10-23T00:00:00+00:00\n')
             log.write_text('shaders 1: ok 1\n')
