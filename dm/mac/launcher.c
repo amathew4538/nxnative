@@ -25,7 +25,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "romfs_image.h"
-#include "save_sync.h"
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
@@ -100,7 +99,7 @@ static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) { 
     if (!lo || !hi || CFGetTypeID(lo) != CFNumberGetTypeID() || CFGetTypeID(hi) != CFNumberGetTypeID()) return 0;
     CFNumberGetValue(lo, kCFNumberDoubleType, &l); CFNumberGetValue(hi, kCFNumberDoubleType, &h);
     char *end; double x = strtod(s, &end);
-    return *s && !isspace((unsigned char)*s) && !strpbrk(s, "xX") && !*end && x == x && x >= l && x <= h;   // as Setting.accepts (LauncherSettings.swift): no leading space, no hex, no NaN
+    return *s && !isspace((unsigned char)*s) && !*end && x == x && x >= l && x <= h;   // as the iPhone's Double(): no leading space, no NaN
 }
 
 static CFArrayRef setting_rules(void) {   // Info.plist DMSettings (pack_app.py, from launcher.json): each setting's variable and the values it takes
@@ -132,18 +131,6 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
         else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
         CFRelease(v);
     }
-}
-
-// Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
-// (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
-static void cloud_saves_folder(void) {
-    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
-    if (getenv("DM_SAVE_SYNC") || !domain) return;
-    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("cloudSaves.folder"), domain); char s[PATH_MAX];
-    if (v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8) && *s) {
-        setenv("DM_SAVE_SYNC", s, 1); fprintf(stderr, "launcher: cloud saves through %s\n", s);
-    }
-    if (v) CFRelease(v);
 }
 
 int main(int argc, char **argv) {
@@ -190,7 +177,6 @@ int main(int argc, char **argv) {
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
-    cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
@@ -208,9 +194,6 @@ int main(int argc, char **argv) {
     if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
     int status;
     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
-    // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
-    // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
-    if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
     if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); return 128 + WTERMSIG(status); }
     fprintf(stderr, "launcher: the host exited with %d\n", WEXITSTATUS(status));
     return WEXITSTATUS(status);
