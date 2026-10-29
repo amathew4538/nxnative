@@ -3603,6 +3603,7 @@ static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
 static NSString *g_shmap_path, *g_msl_dir;
+static NSString *g_jit_cache_dir;
 static NSString *exe_rel(const char *rel) {
     char buf[4096]; uint32_t n = sizeof buf;
     if (_NSGetExecutablePath(buf, &n)) return nil;
@@ -3626,6 +3627,10 @@ static void shmap_load(void) {
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
+    const char *cache = getenv("DM_MTL_CACHE");
+    const char *save = getenv("DM_SAVE");
+    g_jit_cache_dir = cache && *cache ? @(cache) : (save && *save ? [[@(save) stringByAppendingPathComponent:@"metal-cache"] stringByAppendingPathComponent:DMSH_CHAIN] : nil);
+    if (g_jit_cache_dir) [NSFileManager.defaultManager createDirectoryAtPath:g_jit_cache_dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
     // The library's stamp (inputs.tsv, written by a full dmsh_build.py run): the game and the digest of the profile inputs it was built from. The chain version is the same for every
     // game and every state of a profile's tables, so the stamp is what ties c1_full.tsv / cb_extent.tsv to these libraries: each names the inputs of the library it was made from
@@ -3784,6 +3789,35 @@ static void pso_user_record(const char *fmt, ...) {
 static __thread int t_lib_layer;
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
+    if (fd < 0 && [path.pathExtension isEqual:@"metallib"]) {
+        NSString *sourcePath = [[path stringByDeletingPathExtension] stringByAppendingPathExtension:@"metal"];
+        NSString *source = [NSString stringWithContentsOfFile:sourcePath encoding:NSUTF8StringEncoding error:err];
+        if (!source) return nil;
+        const char *mode = getenv("DM_METAL_SHADER_MODE");
+        BOOL precompiled = mode && !strcmp(mode, "precompiled");
+        if (!precompiled && g_msl_dir) precompiled = [NSFileManager.defaultManager fileExistsAtPath:[g_msl_dir stringByAppendingPathComponent:@".precompiled"]];
+        if (precompiled) {
+            if (err) *err = [NSError errorWithDomain:@"NxNativeMetal" code:1 userInfo:@{NSLocalizedDescriptionKey: @"precompiled Metal mode has no metallib for this shader"}];
+            return nil;
+        }
+        if (g_jit_cache_dir) {
+            NSData *bytes = [source dataUsingEncoding:NSUTF8StringEncoding];
+            uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(bytes.bytes, (CC_LONG)bytes.length, digest);
+            NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+            for (NSUInteger i = 0; i < sizeof digest; i++) [hex appendFormat:@"%02x", digest[i]];
+            NSString *cached = [g_jit_cache_dir stringByAppendingPathComponent:[hex stringByAppendingPathExtension:@"metal"]];
+            if (![NSFileManager.defaultManager fileExistsAtPath:cached]) {
+                NSString *tmp = [cached stringByAppendingFormat:@".tmp-%d-%p", getpid(), pthread_self()];
+                if ([bytes writeToFile:tmp options:NSDataWritingAtomic error:nil]) [NSFileManager.defaultManager moveItemAtPath:tmp toPath:cached error:nil];
+            } else {
+                NSString *saved = [NSString stringWithContentsOfFile:cached encoding:NSUTF8StringEncoding error:nil];
+                if (saved.length) source = saved;
+            }
+        }
+        t_lib_layer = [source rangeOfString:@"render_target_array_index"].location != NSNotFound;
+        return [g_dev newLibraryWithSource:source options:nil error:err];
+    }
     if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
     t_lib_layer = m != MAP_FAILED && memmem(m, len, "render_target_array_index", 25) != NULL;   // the library's functions use the layer: for a vertex library, its output (shader_load)
