@@ -57,7 +57,8 @@ PRE_STATS = collections.Counter()
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
-MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
+MAC_PRECOMPILE = os.environ.get('DM_METAL_SHADER_MODE', 'precompiled') == 'precompiled'
+MAC_RECORD = (' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib') if MAC_PRECOMPILE else 'MTLDevice.newLibraryWithSource (runtime)'
 # The outer shader and fetch-variant caches restore compiled libraries directly,
 # before the MSL compile cache can check their compiler. Keep override builds separate there too.
 METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
@@ -1078,7 +1079,7 @@ def finish(key, w, j, c1):
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
-        if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
+        if 'mac' in TARGETS and MAC_PRECOMPILE: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
     except subprocess.CalledProcessError as e:
@@ -1109,6 +1110,11 @@ def finish(key, w, j, c1):
 keys = sorted(want) if want else sorted(loc)
 NJ = int(os.environ.get('J', '8'))
 os.makedirs(out, exist_ok=True)
+mode_marker = os.path.join(out, '.precompiled')
+if MAC_PRECOMPILE:
+    open(mode_marker, 'w').close()
+elif os.path.exists(mode_marker):
+    os.unlink(mode_marker)
 # A full build starts from no shader outputs, a partial one from none of the keys it builds, so what a run leaves is what it built: every output is restored from the cache anyway.
 # The chain version is the same whatever the profile's tables, so a key that left the map, a shader that no longer builds or a variant no longer made would keep an old library.
 # The stamp goes too, and a full build writes it at the end; a partial build keeps it only while it names the profile's current inputs
@@ -1126,7 +1132,8 @@ for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + 
     _mac, _, _ios = _spec.partition('=')
     for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
         if _b.startswith('b-') and os.path.realpath(os.path.join(_mac, _b)) != os.path.realpath(out):
-            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
+            _fill_targets = TARGETS - ({'mac'} if not MAC_PRECOMPILE else set())
+            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=_fill_targets): print(_ln, flush=True)
 packs, jobs, c1s = {}, {}, {}
 digests, rule_fps, cache_reasons, cache_hits = {}, {}, {}, set()
 def rec_of(key):   # → (package name, the shader's record)
