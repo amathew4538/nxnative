@@ -30,7 +30,10 @@ void mtl_res_counts(uint32_t tick, const char *why);   // Print one line of reso
 void mtl_res_snapshot(mtl_res_count *out);
 
 // One submit: begin -> several operations -> commit (returns the fence value at which this submit completes)
+void mtl_prepare(void);                                // the first submission's prepare step (prewarm, pipeline prebuild): no GPU work, called outside the graphics gate
 void mtl_sub_begin(void);
+void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
+void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion

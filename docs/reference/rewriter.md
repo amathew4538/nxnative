@@ -2,6 +2,15 @@
 
 The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/sdk_patches.py`, a profile's `patches.py`). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Disassembler dependencies
+
+### Capstone API version
+
+- **Symptom:** `NameError: name 'CS_ARCH_ARM64' is not defined` at the start of `patch_nso.py`; now `[RED] Capstone 6.… is unsupported` from the NSP script or `patch_nso.py`.
+- **Cause:** Capstone 6 renames the architecture to `CS_ARCH_AARCH64` and the operand constants (`ARM64_OP_*`); the rewriter uses the Capstone 5 API. PyPI's Capstone 6 releases are pre-releases (6.0.0a…), so a plain `pip install capstone` gets 5.x; a `--pre` install or another package's requirement brings in 6.
+- **Fix:** install `capstone>=5,<6` (README and CI). `patch_nso.py` checks the major version (`cs_version()`) before it disassembles anything, and the NSP script checks it before building or surveying, so the extraction is not wasted; both print the install command for the Python that runs them. Capstone 6 is not supported.
+- **Found on:** [Celeste](../../dm/games/01002B30028F6000/README.md#found-on-this-game).
+
 ## Patches across updates
 
 ### Function-matched cuts for unregistered builds
@@ -45,8 +54,8 @@ To enroll a cut for any game's own module:
 
 - **Symptom:** `jump table <addr>` assertion where the index is a copy made before the check (`mov w0,w18`, then 41 instructions holding two other jump tables on `x0`, then `cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18`).
 - **Cause:** every other form follows copies made after the bounds check.
-- **Fix:** `check_before_copy` accepts the `cmp` and `b.hi` right before the load when a `mov wI, wS` up to 64 instructions back is the last writer of both registers; capstone lists a `cmp`'s first operand as written, which the search skips. It runs only when every other form has failed, so modules that rewrote before come out the same.
-- **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`.
+- **Fix:** `check_before_copy` accepts the `cmp` and `b.hi` right before the load when a `mov wI, wS` is the last writer of both registers; capstone lists a `cmp`'s first operand as written, which the search skips. The search follows the function boundary rather than an arbitrary instruction count, stopping at undecodable gaps and calls that can clobber either register. It runs only when every other form has failed.
+- **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`; [Mario + Rabbids Kingdom Battle](../../dm/games/010067300059A000/README.md) `subsdk0+0x7340b8`, whose copy is 71 instructions before the load, across two switches preserving both registers (beyond the former 64-instruction limit).
 - **Note:** before fixing one site, a census of all of them saves a run per site: a copy of `patch_nso.py` whose assert prints and continues found this one alone among the 25,508 `x18` sites. That `main` has no unwind entries for its first 70 MB, so the rewriter disassembles them as one function and takes 6 minutes (see [Long functions analysed in pieces](#long-functions-analysed-in-pieces)).
 
 ### 64-bit bounds check of the index
@@ -206,6 +215,13 @@ To enroll a cut for any game's own module:
 - **Fix:** when the text ends within 32 MB of the reach (`BIG_TEXT`), the patch area goes right before the base: the stubs follow the sites in address order, so each site's stub is about as far from it as the text is long. The first pass tries the gap that keeps every site in reach (2.6 MB here); when the patch area is larger (3.6 MB, 34,322 sites), the rewriter runs itself again with exactly that size (`DM_PATCH_FRONT`, set only by the rerun) and `B()` checks every branch.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) `main`: 125.3 MB of text.
 
+### Two patch areas for a text longer than a branch reaches
+
+- **Symptom:** `main: patch area of 0x6b9d38 bytes does not fit in -0x39c0000 before the base; rewriting again with 0x6c0000`, then a `B()` range assertion in `site_window`: the gap before the base came out negative.
+- **Cause:** a text longer than the ±128 MB a `b` reaches has no place for one patch area from which every site is in reach: before the base the last sites are too far, after the image the first ones.
+- **Fix:** such a module (`TWO` in `patch_nso.py`: the text alone ends past the reach) gets two patch areas. The front one, 16 MB before the base, takes the sites below `SPLIT` (128 MB less the front area and 1 MB of margin for a stub's exits past its site); the back one, right after bss, the key page and the frame step page (`BACK_OFF`, 64 KB aligned), takes the others. A site's stubs and their branches back stay in its own area (`use_area`); when the front sites need more room, the rewriter runs again with exactly that size, and `B()` checks every branch. The file is the image, the front area padded to 16 KB, then the back area; `fixups.tsv` adds `BACK_OFF` and `BACK_LEN`, and `IMAGE_SIZE` covers the back area. The Mac loader copies it to `BACK_OFF` and seals it read-only and executable, the iOS embedding gives it a fourth section (`gen_embed.py`: `__TEXT,__dm<name>x2`) that the loader remaps there, and `svcQueryMemory` reports it as CodeData+RX like a patch area after the image (data and bss end at it). A module that does not need it is rewritten byte for byte as before.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) `main` (1.8d.310c): 185.6 MB of text, 177,058 sites; 3.9 MB of stubs in front and 3.2 MB at `BACK_OFF` `0xdec0000`.
+
 ## Cuts and observation gates
 
 ### Observation gates where x9–x17 are dead
@@ -249,6 +265,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) `main` (.NET NativeAOT).
 - **Check:** no module of the 19 other games on hand has a data block, and their rewrites are byte-identical.
 
+### NRO metadata inside the text segment
+
+- **Symptom:** `RuntimeError: 44 ldr x18, #0xfffffffffff40370` while rewriting an NRO.
+- **Cause:** an NRO's text segment includes its metadata header. The arbitrary build ID at `+0x40` can decode as instructions; `magic_0898_2015.nro` contains a literal load into `x18` at `+0x44`. The ordinary 4 KB data-gap heuristic cannot exclude this 120-byte header.
+- **Fix:** `nso_code.data_blocks` explicitly excludes `+8..+0x80` when the image has the `NRO0` header. The initial entry branch and MOD0 pointer remain intact, and scanning resumes at the first possible function. NSO scanning is unchanged.
+- **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), 1,432 registered NROs.
+- **Check:** `test_nro_header.py` runs the real rewriter on synthetic NROs whose build IDs decode as an `x18` load or `br x18`, checks the header byte-for-byte, and checks that an actual `x18` instruction immediately after it is rewritten. Code before the first unwind entry is covered too: per-function analysis must not reenter the header even when the linear scans exclude it.
+
 ## Stack and system registers
 
 ### Stack pointer writes through x18
@@ -281,6 +305,13 @@ To enroll a cut for any game's own module:
 - **Cause:** SDK 20 modules pack their relative relocations as `DT_RELR` (tag 36, size tag 35): `main` has 223,994 of them and its `DT_RELA` only symbol relocations. Each 8-byte entry is either an even offset (relocate it, move to the next slot) or an odd bitmap whose bits 1–63 stand for the following 63 slots; the addend is the slot's own value.
 - **Fix:** `relr_apply` in `loader.c`; `DM_LOADHASH` and `nvn_slots_got.py` read it too. The loader's log line counts them as `relr=`.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0 (SDK 20).
+
+### Regression rewrites register copied profiles twice
+
+- **Symptom:** `regress.py check` stops before gameplay with `CUTS of build ... in both ...`, naming a revision profile and its copied harness profile.
+- **Cause:** shader builds use a writable profile copy for generated tables. Passing that copy to the rewriter exposes its `patches.py` alongside the revision's original, registering every cut twice.
+- **Fix:** registered games rewrite with the revision's original profile; provisional games retain their external profile path. Shader builds continue using their writable copies. The harness regression covers both selections.
+- **Found on:** [NieR:Automata geometry review](../../dm/games/010056B015FE8000/README.md#geometry-optimization-review), when comparing rewrites after reconciling PRs #336 and #416.
 
 ## Checking a rewriter change
 
