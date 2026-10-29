@@ -43,6 +43,10 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 #define IMG_H(h) (((h) >> 62) == 1)
 #define IMG_M(h) ((int)(((h) >> 32) & 0x3fffffff))
 #define IMG_K(h) ((uint32_t)(h))
+// Guest file handles are 16-byte aligned Horizon objects. Keep host descriptors
+// behind the low four bits so game code can mask those bits without changing them.
+#define FH_OUT(h) ((uint64_t)(h) << 4)
+#define FH_IN(h) ((uint64_t)(h) >> 4)
 typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
@@ -711,7 +715,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     struct stat st; fstat(fd, &st);
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
     if (fd >= (int)sizeof g_fmode) die("fd beyond the table");
-    g_fmode[fd] = (uint8_t)mode; *out = (uint64_t)fd;
+    g_fmode[fd] = (uint8_t)mode; *out = FH_OUT(fd);
     { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0;
       for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
       atomic_store(&g_ftxn[fd], token); }
@@ -722,7 +726,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
-    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
+    size_t got = 0; int reprep = 0, fd = (int)FH_IN(h); int64_t base = 0;
     if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
         const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
         fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
@@ -751,8 +755,8 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;
-        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
-        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf);
+        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && FH_IN(h) < 4096 && g_fdpath[FH_IN(h)] ? g_fdpath[FH_IN(h)] : "?", (long long)off, got, buf, (unsigned long long)fh);
+        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && FH_IN(h) < 4096 && g_fdpath[FH_IN(h)] ? g_fdpath[FH_IN(h)] : "?", (long long)off, got, buf);
         pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) {   // Read metering: print a line every 64 MiB accumulated or every 1000 reads
         static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
@@ -764,7 +768,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
 }
 HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp-srv → pwrite(2)", Result, h_fs_WriteFile, uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) {
     if (!h || IMG_H(h)) return RES_FAIL;
-    int fd = (int)h & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
+    int fd = (int)FH_IN(h) & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = NULL;
     if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
     (void)opt; size_t put = 0;
@@ -776,7 +780,7 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
         if (g_save_fail_n && n == g_save_fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, g_save_fail_e); errno = g_save_fail_e; save_poison_txn(txn, g_save_fail_e); return err_res("pwrite (injected)", "fd"); }
     }
     while (put < sz) {
-        ssize_t r = pwrite((int)h, (const uint8_t *)buf + put, sz - put, off + put);
+        ssize_t r = pwrite((int)FH_IN(h), (const uint8_t *)buf + put, sz - put, off + put);
         if (r < 0) { if (errno == EINTR) continue; if (txn >= 0) save_poison_txn(txn, errno); return err_res("pwrite", "fd"); }
         if (r == 0) { errno = ENOSPC; if (txn >= 0) save_poison_txn(txn, ENOSPC); return err_res("pwrite (wrote 0 bytes)", "fd"); }   // This used to loop forever here
         put += r;
@@ -786,24 +790,24 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
 HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", Result, h_fs_GetFileSize, int64_t *out, uint64_t h) {
     if (!h) return RES_FAIL;
     if (IMG_H(h)) { *out = (int64_t)g_mnt[IMG_M(h)].img->e[IMG_K(h)].b; return RES_OK; }
-    struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
+    struct stat st; if (fstat((int)FH_IN(h), &st)) return err_res("fstat", "fd");
     *out = st.st_size; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)", Result, h_fs_SetFileSize, uint64_t h, int64_t sz) {
     if (!h || IMG_H(h)) return RES_FAIL;
-    int fd = (int)h & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
+    int fd = (int)FH_IN(h) & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = NULL;
     if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
-    if (!ftruncate((int)h, sz)) return RES_OK;
+    if (!ftruncate((int)FH_IN(h), sz)) return RES_OK;
     if (txn >= 0) save_poison_txn(txn, errno);
     return err_res("ftruncate", "fd");
 }
 HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { (void)h; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) {
     if (!h || IMG_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
-    g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
-    close((int)h); }
-HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { return IMG_H(h) ? MODE_READ : g_fmode[(int)h & 0xffff]; }
+    g_fmode[(int)FH_IN(h) & 0xffff] = 0; atomic_store(&g_ftxn[(int)FH_IN(h) & 0xffff], 0);
+    close((int)FH_IN(h)); }
+HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { return IMG_H(h) ? MODE_READ : g_fmode[(int)FH_IN(h) & 0xffff]; }
 
 // ---------- Path operations ----------
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) {
@@ -948,7 +952,7 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
             memcpy(o->name, m->names + c->name, c->nlen < sizeof o->name ? c->nlen : sizeof o->name - 1);
             o->type = c->type ? ENT_FILE : ENT_DIR; o->size = c->type ? (int64_t)c->b : 0;
         }
-        *out = (uint64_t)h; return RES_OK;
+        *out = FH_OUT(h); return RES_OK;
     }
     HP(path); DIR *d = opendir(hp);
     if (!d) return err_res("opendir", hp);
@@ -957,11 +961,11 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
     if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].overlay[0] && strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, (size_t)(c - path))) {
         dir_snapshot(h, &g_mnt[i], c + 1); break;
     }
-    *out = (uint64_t)h; return RES_OK;
+    *out = FH_OUT(h); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", "fsp-srv → readdir(3)", Result, h_fs_ReadDirectory, int64_t *count, DirectoryEntry *ents, uint64_t hh, int64_t max) {
     if (!hh) { *count = 0; return RES_FAIL; }
-    PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0; struct dirent *e;
+    PATH_LOCK(); dirh_t *h = (dirh_t *)FH_IN(hh); int64_t n = 0; struct dirent *e;
     if (h->snap) { while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; } *count = n; return RES_OK; }
     int dfd = dirfd(h->d);
     while (n < max && (e = readdir(h->d))) {
@@ -979,7 +983,7 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
 }
 HLE_FORCE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", "fsp-srv → closedir(3)", void, h_fs_CloseDirectory, uint64_t hh) {
     if (!hh) return;   // the game also closes after a failed open (handle 0): nothing to do in the original either
-    dirh_t *h = (dirh_t *)hh; if (h->d) closedir(h->d); if (h->od) closedir(h->od); free(h->snap); free(h);
+    dirh_t *h = (dirh_t *)FH_IN(hh); if (h->d) closedir(h->d); if (h->od) closedir(h->od); free(h->snap); free(h);
 }
 
 // ---------- Overloads from newer SDKs (SDK 16: MountRom without a cache, ReadFile without the bytes-read output / with read options, directory entry count) ----------
@@ -994,7 +998,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm", "fsp-srv → pread(2), mus
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE", "fsp-srv → pread(2) (overload with read options, which the host ignores)", Result, h_fs_ReadFileOpt,
           size_t *out, uint64_t h, int64_t off, void *buf, size_t sz, const void *opt) { (void)opt; return h_fs_ReadFile(out, h, off, buf, sz); }
 HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv; directory entry count (filtered by the mode given at open, read position untouched)", Result, h_fs_DirCount, int64_t *out, uint64_t hh) {
-    PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0;
+    PATH_LOCK(); dirh_t *h = (dirh_t *)FH_IN(hh); int64_t n = 0;
     if (h->snap) { for (int64_t i = 0; i < h->nsnap; i++) if (h->mode & (h->snap[i].type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE)) n++; *out = n; return RES_OK; }
     DIR *d = opendir(h->path); if (!d) return err_res("opendir", h->path);
     struct dirent *e;

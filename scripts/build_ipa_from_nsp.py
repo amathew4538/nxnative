@@ -61,6 +61,7 @@ ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's
 ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
                                         #   True packs the app without them
 ALLOW_OTHER_METAL = False               # retained for command-line compatibility; Mac shaders no longer use an offline compiler
+METAL_SHADER_MODE = 'jit'               # 'jit' compiles MSL on first use; 'precompiled' packages macOS metallibs
 PROVISIONAL = False                     # build from a provisional profile even when dm/games has one for the game (to test the guesses; the profile goes to PROFILE_OUT / <id>_build/profile)
 HEAP_CHECK = True                       # a provisional profile whose game has virtual address memory and sets a heap: boot it on the Mac until its heap request (a few seconds) to size the heap region
 HEAP_CHECK_SECS = 30                    # the longest heap check (it stops at the first heap request, or HEAP_CHECK_NNMAIN_SECS into nnMain without one)
@@ -1857,6 +1858,7 @@ def parse_args(argv):
     ap.add_argument('--allow-shader-regressions', action='store_true', help='shaders that translated in the game\'s previous build and fail with the current translation chain: '
                     'pack the app without them instead of stopping')
     ap.add_argument('--allow-other-metal', action='store_true', help='deprecated compatibility option; Mac shaders compile at runtime')
+    ap.add_argument('--metal-shaders', choices=('jit', 'precompiled'), help='Mac Metal shader mode: jit compiles MSL on first use and caches it in the game save folder; precompiled packages macOS metallibs (default: jit)')
     ap.add_argument('--profile-out', help='where the provisional profile goes (default: <NSP folder>/<title ID>_build/profile)')
     ap.add_argument('--provisional', action='store_true', help='build from a provisional profile even when dm/games has one for the game (tests the guesses)')
     ap.add_argument('--no-heap-check', action='store_true', help='a provisional profile: skip the heap check on the Mac (the alias / heap split stays a guess)')
@@ -1890,6 +1892,7 @@ def main(args=None):
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
     global ALLOW_SHADER_REGRESSIONS; ALLOW_SHADER_REGRESSIONS = args.allow_shader_regressions or ALLOW_SHADER_REGRESSIONS
     global ALLOW_OTHER_METAL; ALLOW_OTHER_METAL = args.allow_other_metal or ALLOW_OTHER_METAL
+    global METAL_SHADER_MODE; METAL_SHADER_MODE = args.metal_shaders or METAL_SHADER_MODE
     here = Path(globals().get('__file__') or sys.argv[0]).resolve()
     if sys.version_info < (3, 12): raise BuildError('Direct RomFS image builds require Python 3.12 or newer')
     repo = find_repo(here)
@@ -1984,7 +1987,8 @@ def main(args=None):
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
-    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_METAL_SHADER_MODE=METAL_SHADER_MODE)
+    if METAL_SHADER_MODE == 'precompiled': env['DMSH_MAC_PRECOMPILE'] = '1'
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
