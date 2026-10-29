@@ -60,8 +60,9 @@ PROFILE_OUT = ''                        # where a provisional profile goes (empt
 ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download) stops the build; True writes those files as read and goes on
 ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
                                         #   True packs the app without them
-ALLOW_OTHER_METAL = False               # retained for command-line compatibility; Mac shaders no longer use an offline compiler
-METAL_SHADER_MODE = 'jit'               # 'jit' compiles MSL on first use; 'precompiled' packages macOS metallibs
+ALLOW_OTHER_METAL = False               # an NVN game's shaders are built only with the Metal compiler they were tested with (dm/gfx/tools/dmsh_chain.lock: Xcode 27.1); another one stops the build,
+METAL_SHADER_MODE = 'precompiled'       # 'precompiled' packages Mac metallibs; 'jit' keeps MSL and compiles it in the host
+                                        #   as its shaders can render wrong pictures (GitHub issue #242). True builds them with this Mac's Metal compiler anyway
 PROVISIONAL = False                     # build from a provisional profile even when dm/games has one for the game (to test the guesses; the profile goes to PROFILE_OUT / <id>_build/profile)
 HEAP_CHECK = True                       # a provisional profile whose game has virtual address memory and sets a heap: boot it on the Mac until its heap request (a few seconds) to size the heap region
 HEAP_CHECK_SECS = 30                    # the longest heap check (it stops at the first heap request, or HEAP_CHECK_NNMAIN_SECS into nnMain without one)
@@ -1857,8 +1858,9 @@ def parse_args(argv):
     ap.add_argument('--allow-damaged', action='store_true', help='a damaged NSP (files failing the NCA hash check): write them as read and go on instead of stopping')
     ap.add_argument('--allow-shader-regressions', action='store_true', help='shaders that translated in the game\'s previous build and fail with the current translation chain: '
                     'pack the app without them instead of stopping')
-    ap.add_argument('--allow-other-metal', action='store_true', help='deprecated compatibility option; Mac shaders compile at runtime')
-    ap.add_argument('--metal-shaders', choices=('jit', 'precompiled'), help='Mac Metal shader mode: jit compiles MSL on first use and caches it in the game save folder; precompiled packages macOS metallibs (default: jit)')
+    ap.add_argument('--allow-other-metal', action='store_true', help='an NVN game: build its shaders with this Mac\'s Metal compiler when it is not the one they were tested with '
+                    '(dm/gfx/tools/dmsh_chain.lock, Xcode 27.1) instead of stopping; such shaders can render wrong pictures')
+    ap.add_argument('--metal-shaders', choices=('jit', 'precompiled'), help='Mac Metal shader mode: precompiled packages metallibs; jit compiles MSL on first use and caches it in the game save folder (default: precompiled)')
     ap.add_argument('--profile-out', help='where the provisional profile goes (default: <NSP folder>/<title ID>_build/profile)')
     ap.add_argument('--provisional', action='store_true', help='build from a provisional profile even when dm/games has one for the game (tests the guesses)')
     ap.add_argument('--no-heap-check', action='store_true', help='a provisional profile: skip the heap check on the Mac (the alias / heap split stays a guess)')
@@ -1988,7 +1990,6 @@ def main(args=None):
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_METAL_SHADER_MODE=METAL_SHADER_MODE)
-    if METAL_SHADER_MODE == 'precompiled': env['DMSH_MAC_PRECOMPILE'] = '1'
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)

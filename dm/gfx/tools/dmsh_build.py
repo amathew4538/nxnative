@@ -47,36 +47,18 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-MAC_PRECOMPILE = os.environ.get('DMSH_MAC_PRECOMPILE') == '1'
-MAC_RECORD = 'macosx metal (precompiled)' if MAC_PRECOMPILE else 'MTLDevice.newLibraryWithSource (runtime)'
-# The Mac output is source-only unless explicitly requested. The iOS compiler identity still keys its offline cache.
-METAL_FP = ('macosx-metal' if MAC_PRECOMPILE else 'runtime-source') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
-class RuntimeMetal:
-    """The Mac target is source-only; Metal compiles it inside the host."""
-    def compile(self, target, msl, lib):
-        if target == 'mac' and MAC_PRECOMPILE:
-            air = msl[:-5] + '.mac.air'
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', msl, '-o', air], check=True)
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
-            try: os.unlink(air)
-            except OSError: pass
-            return
-        if target == 'ios':
-            return self.ios.compile(msl, msl[:-6] + '.ios.air', lib)
-
-    def with_compiler(self, target, refl):
-        if target == 'mac':
-            return dict(refl, chain_metal=MAC_RECORD, chain_compiler='runtime')
-        return self.ios.with_compiler(target, refl)
-
-    def fill(self, *args):
-        return []
-
-    def summary(self):
-        return 'Metal cache: mac runtime source compilation' + (f'; {self.ios.summary()}' if hasattr(self, 'ios') else '')
-# The NVN driver's constant segments have one layout in every game (NVN 53 and 55 drivers, SDK 6 to 21: the handles of every shader of every profile fit it); nvn_mtl.m fills them the same way at run time.
-#   c2 0x20 + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
-#     image table (Hades II binds slot 34, at 0x130, and no image), so a texture instruction's handle anywhere below the separate texture table names a combined slot. In the image
+MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
+MAC_PRECOMPILE = os.environ.get('DM_METAL_SHADER_MODE', 'precompiled') == 'precompiled'
+MAC_RECORD = (' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib') if MAC_PRECOMPILE else 'MTLDevice.newLibraryWithSource (runtime)'
+# The outer shader and fetch-variant caches restore compiled libraries directly,
+# before the MSL compile cache can check their compiler. Keep override builds separate there too.
+METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
+def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
+    subprocess.run([*MAC_METAL, msl, '-o', air], check=True)
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
+# The NVN driver's constant segments have one layout in every game, which dm/gfx/nvn/dmsh_abi.h holds for the host and this build (through dmsh_abi.py); nvn_mtl.m fills them the same way at run time.
+#   c2 C2_TEX + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
+#     image table (Hades II binds slot 34, and no image), so a texture instruction's handle anywhere below the separate texture table names a combined slot. In the image
 #     table that slot reads the image when one is bound there (nvn_mtl.m tex_slot_h): a size query of the image a compute shader writes (Unreal's GetDimensions on a RWTexture3D),
 #     whose type the translator takes from the shader's surface instructions on that handle (dmsh_xlate ImageDims)
 #   c2 0x120 + 8 r: images (nvnCommandBufferBindImage), slot r < 8
@@ -955,8 +937,12 @@ def finish(key, w, j, c1):
         full, lay = vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
         open(msl, 'w').write(full)
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
-    if fu: plain = src; open(msl, 'w').write(fu)
-    try: MTL.compile('mac', msl, lib)   # MSL identical to one compiled before takes that library (dmsh_mtlcache.py)
+    fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
+    if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
+        if 'mac' in TARGETS and MAC_PRECOMPILE: MTL.compile('mac', msl, lib)
+        if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
+    try: compile_targets()
     except subprocess.CalledProcessError as e:
         if not lay and not fu: return 'metal failed', str(e)[:160], None
         open(msl, 'w').write(plain); lay = fu = None   # the layer and integer-output entry points are extras: a library that does not build with them is built without
@@ -1011,7 +997,8 @@ for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + 
     _mac, _, _ios = _spec.partition('=')
     for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
         if _b.startswith('b-') and os.path.realpath(os.path.join(_mac, _b)) != os.path.realpath(out):
-            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None): print(_ln, flush=True)
+            _fill_targets = TARGETS - ({'mac'} if not MAC_PRECOMPILE else set())
+            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=_fill_targets): print(_ln, flush=True)
 packs, jobs, c1s = {}, {}, {}
 digests, rule_fps, cache_reasons, cache_hits = {}, {}, {}, set()
 def rec_of(key):   # → (package name, the shader's record)

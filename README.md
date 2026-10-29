@@ -11,15 +11,51 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 This project is built on other people's work:
 
-- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
-- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' Maxwell shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
-- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables).
-- **yuzu**: Maxwell instruction encodings for the shader reference tool, and a cross-check for kernel behaviour.
-- **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`. **hactool** did the first extractions.
-- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language. **[glslang](https://github.com/KhronosGroup/glslang)** compiles the GLSL of OpenGL games to SPIR-V for it.
-- **deko3d** (zlib): its texture layout size algorithm is ported in `dm/gfx/nvn/nvn_tex.c`.
-- **libvpx** (VP9 movies), **stb_vorbis** (movie sound), the **Vulkan headers** and **NVIDIA FLIP** ship in `dm/third_party` with their licenses ([list](dm/third_party/README.md)).
-- **Capstone**, **lz4**, **fontTools** and **XcodeGen** are used by the build.
+- [NX2Apple](https://github.com/LNPANDY/NX2Apple)
+- [NX Play](https://github.com/varyform/nx-native-wrapper)
+- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher)
+
+### Build from the command line
+
+You need a Mac with macOS 26.6 or later, [Xcode](https://apps.apple.com/app/xcode/id497799835) 27.1, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
+
+**1. Install the tools** (only once), in Terminal:
+
+```
+xcodebuild -downloadComponent MetalToolchain
+git clone https://github.com/seedds/nxnative.git && cd nxnative
+brew install xcodegen zstd glslang
+brew install --cask dotnet-sdk
+python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
+```
+
+**2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
+
+```
+~/Games/MarioWonder/
+  Super Mario Bros. Wonder [010015100B514000][v0].nsp
+  Super Mario Bros. Wonder [010015100B514800][v327680].nsp
+```
+
+**3. Build**, with your game folder and your `prod.keys`:
+
+```
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
+```
+
+The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
+
+To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
+
+Metal shaders are precompiled by default. To use JIT compilation instead, add `--metal-shaders jit`; the generated MSL is compiled on first use and cached in the game's save folder. Use `--metal-shaders precompiled` to explicitly select packaged Mac metallibs.
+
+### Install
+
+Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
+
+Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)).
+
+Controls, saves and settings: [Playing](docs/playing.md).
 
 ## Games
 
