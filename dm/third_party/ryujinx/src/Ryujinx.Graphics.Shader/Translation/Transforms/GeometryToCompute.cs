@@ -306,17 +306,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
         private static LinkedListNode<INode> GeneratePrimitiveId(ResourceManager resourceManager, LinkedListNode<INode> node, Operand dest, bool outputIndex = false)
         {
             if (resourceManager.Reservations.GeometryInputFixed && !outputIndex)
-            {
-                // Replay may split one draw into several compute dispatches.
-                // Guest primitive IDs remain draw-wide; topology remapping and
-                // output allocation must keep using the dispatch-local index.
-                Operand localId = Local();
-                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.Input, localId, new[] { Const((int)IoVariable.GlobalId), Const(0) }));
-                Operand primitiveBase = Local();
-                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.ConstantBuffer, primitiveBase,
-                    new[] { Const(resourceManager.Reservations.VertexInfoConstantBufferBinding), Const((int)VertexInfoBufferField.GeometryCounts), Const(1) }));
-                return node.List.AddBefore(node, new Operation(Instruction.Add, dest, new[] { localId, primitiveBase }));
-            }
+                return node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.Input, dest, new[] { Const((int)IoVariable.GlobalId), Const(0) }));
             int vertexInfoCbBinding = resourceManager.Reservations.VertexInfoConstantBufferBinding;
 
             Operand vertexCount = Local();

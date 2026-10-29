@@ -73,10 +73,7 @@ typedef struct { const char *name; void *fn; } nvn_impl;
     static ret h_##name(__VA_ARGS__)
 
 static int g_log;
-static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint64_t g_serial;
-uint64_t nvn_new_serial(void) { return ++g_serial; }
-void nvn_serial_floor(uint64_t s) { uint64_t c = atomic_load(&g_serial); while (c < s && !atomic_compare_exchange_weak(&g_serial, &c, s)) {} }
+uint64_t nvn_new_serial(void) { static _Atomic uint64_t n; return ++n; }
 static unsigned g_nsem;                          // Number of semantic implementations (filled by nvn_init_slots)
 #define OLOG(...) do { if (g_log) LOG("[nvn] " __VA_ARGS__); } while (0)
 
@@ -112,7 +109,6 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
-#include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
 
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
@@ -511,9 +507,6 @@ NVN(nvnTextureCompare, NVNboolean, const NVNtexture *a, const NVNtexture *b) {
 }
 // No prototype in the header; call sites such as main 0x174899c compare the return value with 1 and set some status bit 0x100 if not equal. Meaning unverified; return 1 for now
 NVN_NOPROTO(nvnTextureGetRawStorageClass, int, const NVNtexture *t) { (void)t; return 1; }
-// The class a texture from this builder would report, so the two agree: EA SPORTS FC 27's Frostbite renderer asks the builder (the class names the page kind a virtual pool maps,
-// NVNmappingRequest.storageClass, which the host's virtual pools do not distinguish)
-NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, int, const NVNtextureBuilder *b) { (void)b; return 1; }
 #define VW(v) ((view_t *)(v))
 NVN(nvnTextureViewSetDefaults, void, NVNtextureView *v) { memset(v, 0, sizeof(view_t)); }
 NVN(nvnTextureViewSetLevels, void, NVNtextureView *v, int base, int n) { VW(v)->set_levels = 1; VW(v)->base_level = base; VW(v)->nlevels = n; }
@@ -563,9 +556,6 @@ NVN(nvnSamplerBuilderSetLodClamp, void, NVNsamplerBuilder *b, float lo, float hi
 NVN(nvnSamplerBuilderSetLodBias, void, NVNsamplerBuilder *b, float v) { SB(b)->lod_bias = v; }
 NVN(nvnSamplerBuilderSetCompare, void, NVNsamplerBuilder *b, NVNcompareMode m, NVNcompareFunc f) { SB(b)->cmp_mode = m; SB(b)->cmp_func = f; }
 NVN(nvnSamplerBuilderSetBorderColor, void, NVNsamplerBuilder *b, const float *c) { memcpy(SB(b)->border, c, 16); }
-// Metal's fixed border colours are selected numerically, also for integer textures. Bit-casting integer 1 to float would select transparent black instead of opaque black/white.
-NVN(nvnSamplerBuilderSetBorderColori, void, NVNsamplerBuilder *b, const int *c) { for (int i = 0; i < 4; i++) SB(b)->border[i] = (float)c[i]; }
-NVN(nvnSamplerBuilderSetBorderColorui, void, NVNsamplerBuilder *b, const uint32_t *c) { for (int i = 0; i < 4; i++) SB(b)->border[i] = (float)c[i]; }
 NVN(nvnSamplerBuilderSetMaxAnisotropy, void, NVNsamplerBuilder *b, float v) { SB(b)->aniso = v; }
 NVN(nvnSamplerBuilderSetLodSnap, void, NVNsamplerBuilder *b, float v) { (void)b; (void)v; }   // No Metal equivalent, ignored
 NVN(nvnSamplerBuilderGetMinMagFilter, void, const NVNsamplerBuilder *b, NVNminFilter *mi, NVNmagFilter *ma) {
@@ -616,12 +606,7 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
-    // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
-    // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
-    if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
-        uint8_t ctl[0x880]; memcpy(ctl, sd->control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
-        CC_SHA256_Update(&hc, ctl, nctl);
-    } else CC_SHA256_Update(&hc, sd->control, nctl);
+    CC_SHA256_Update(&hc, sd->control, nctl);
     if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
@@ -717,12 +702,10 @@ NVN(nvnQueueInitialize, NVNboolean, NVNqueue *q, const NVNqueueBuilder *b) {
     // Changing the device origin later changes viewport construction, but does
     // not rewrite that queue state (Xenoblade 2 creates its queue first).
     *(queue_t *)q = (queue_t){MAGIC('Q', 'U', 'E', 'U'), d, 0,
-                            !d || ((const dev_t_ *)d)->origin == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT, nvn_new_serial()};
+                            !d || ((const dev_t_ *)d)->origin == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT};
     OLOG("QueueInitialize %p", (void *)q); return 1;
 }
-NVN(nvnQueueFinalize, void, NVNqueue *q) {
-    pthread_mutex_lock(&g_sub_mu); mtl_queue_forget(((queue_t *)q)->serial); ((queue_t *)q)->magic = 0; pthread_mutex_unlock(&g_sub_mu);
-}
+NVN(nvnQueueFinalize, void, NVNqueue *q) { ((queue_t *)q)->magic = 0; }
 NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *info) {
     (void)q; if (info) memset(info, 0, sizeof *info); return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
@@ -1006,10 +989,7 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 }
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     if (n < 0 || n > 32) { LOG("[RED] bind handle count %d", n); return NULL; }
-    p_bind_handles *r = RECN(c, op, p_bind_handles, h, n); r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0;
-    // The driver writes each handle into the c2 table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half of the 64-bit handle.
-    // EA SPORTS FC 27 binds separate textures with bit 32 set (0x1000001d1): read whole, its sampler ID was 4096, beyond any pool, where the GPU reads sampler 0
-    for (int i = 0; i < n; i++) r->h[i] = (uint32_t)h[i];
+    p_bind_handles *r = RECN(c, op, p_bind_handles, h, n); r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0; memcpy(r->h, h, 8 * n);
     {   // this command buffer may have bound a pool other than the first: move its IDs to that pool's part of the table (handle: texture ID in bits 0-19, sampler ID from bit 20)
         int tb = CB(c)->tex_base, sb = CB(c)->samp_base;
         for (int i = 0; i < n && (tb || sb); i++) {
@@ -1080,14 +1060,6 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
     p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2); o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, (uint64_t)__builtin_return_address(0)); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, (uint64_t)__builtin_return_address(0));
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
-}
-// A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
-// Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool
-NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, const NVNdrawTextureRegion *d, const NVNdrawTextureRegion *s) {
-    uint64_t tid = (uint64_t)h & 0xfffff, sid = (uint64_t)h >> 20;
-    if (tid) tid += (uint64_t)CB(c)->tex_base;
-    if (sid) sid += (uint64_t)CB(c)->samp_base;
-    *REC(c, OP_DRAW_TEX, p_draw_tex) = (p_draw_tex){tid | sid << 20, *d, *s};
 }
 NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 0; }
 NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 1; }   // Link's Awakening
@@ -1200,19 +1172,14 @@ void dm_gfx_suspend(int on) {
 }
 // One submission at a time: the Metal replay keeps one command buffer and one upload batch for the submission in progress (nvn_mtl.m g_cb). Fire Emblem: Three Houses initializes two queues and
 // submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. NVN orders work on different queues only
-// through syncs, so replaying the two queues' submissions in lock order is one valid order.
-// The first submission's prepare step (mtl_prepare: the prewarm and the pipeline prebuild) loads shaders and builds pipelines and submits no GPU work, so it runs under the lock but outside the
-// graphics gate: inside it, going to the background meanwhile (dm_gfx_suspend, on the main thread) waited for it, minutes on a first start. It stays host work for the guest scheduler. The lock
-// comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
+// through syncs, so replaying the two queues' submissions in lock order is one valid order
+static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
-    dm_host_mutex_lock(&g_sub_mu);
-    dm_host_work++; mtl_prepare(); dm_host_work--;
     gfx_enter();
+    pthread_mutex_lock(&g_sub_mu);
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
     ((queue_t *)q)->submits++;
-    mtl_queue_activate(((const queue_t *)q)->serial);
     mtl_set_queue_origin_lower_left(((const queue_t *)q)->origin_ll);
-    nvn_cap_submit(n, (const uint64_t *)h);   // DM_NVN_CAPTURE (nvn_capture.inc)
     mtl_sub_begin();
     nvn_ft_poll();
     mtl_sub_index((const uint64_t *)h, n);
@@ -1463,14 +1430,6 @@ static void power_line(uint64_t frame) {
             (unsigned long long)(cut - pcut), (unsigned long long)(ccut - pccut), (unsigned long long)(bsp - pbsp), (unsigned long long)(ud - pud), (unsigned long long)(uc - puc), (unsigned long long)(pm - ppm), (unsigned long long)(pr - ppr), (unsigned long long)(pf_ - ppf), (unsigned long long)(w5[1] - pw5[1]), (unsigned long long)(w5[2] - pw5[2]), (unsigned long long)(w5[3] - pw5[3]), (unsigned long long)(w5[0] - pw5[0]), (unsigned long long)(w5[4] - pw5[4]), (unsigned long long)(lt - plt), (unsigned long long)(ll - pll), (unsigned long long)(smp - psmp), (unsigned long long)(smc - psmc), (unsigned long long)(smw - psmw), (unsigned long long)(chm - pchm), (unsigned long long)(chd - pchd),
             (unsigned long long)(chs[1] - pchs[1]), (unsigned long long)(chs[2] - pchs[2]), (unsigned long long)(chs[3] - pchs[3]), (unsigned long long)(chs[7] - pchs[7]), (unsigned long long)(chs[5] - pchs[5]),
             (ld - pld) / 1048576.0 / nf, (st - pst) / 1048576.0 / nf, (fu - pfu) / nf, (udc - pudc) / 1048576.0 / nf); pbs = bs; pbf = bf; pcut = cut; pccut = ccut; pbsp = bsp; pud = ud; puc = uc; ppm = pm; ppr = pr; ppf = pf_; memcpy(pw5, w5, sizeof pw5); plt = lt; pll = ll; psmp = smp; psmc = smc; psmw = smw; pchm = chm; pchd = chd; memcpy(pchs, chs, sizeof pchs);
-        void mtl_geohoist_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t pgh, pgr, pgs[6]; uint64_t gh, gr, gs[6]; mtl_geohoist_stats(&gh, &gr, gs);
-        if (gh != pgh || gr != pgr) LOG("[nvn] geometry hoist up to frame %llu: %llu draws prepared ahead of their pass in %llu runs; runs ended by a raster read %llu, a draw that cannot be passed %llu, the table %llu, a kernel or capture hazard %llu, a draw not lean %llu, another op %llu",
-            frame, (unsigned long long)(gh - pgh), (unsigned long long)(gr - pgr), (unsigned long long)(gs[0] - pgs[0]), (unsigned long long)(gs[1] - pgs[1]), (unsigned long long)(gs[2] - pgs[2]),
-            (unsigned long long)(gs[3] - pgs[3]), (unsigned long long)(gs[4] - pgs[4]), (unsigned long long)(gs[5] - pgs[5]));
-        pgh = gh; pgr = gr; memcpy(pgs, gs, sizeof pgs);
-        void mtl_geomesh_stats(uint64_t *, uint64_t *); static uint64_t pmn, pmw; uint64_t mn, mw; mtl_geomesh_stats(&mn, &mw);
-        if (mn != pmn || mw != pmw) LOG("[nvn] geometry mesh draws up to frame %llu: %llu, and %llu through the compute path while their pipelines were built", frame, (unsigned long long)(mn - pmn), (unsigned long long)(mw - pmw));
-        pmn = mn; pmw = mw;
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
@@ -1605,8 +1564,6 @@ static _Atomic uint64_t g_itv2_since;   // start of the game's current run of in
 // (fstep_tick, nvn_fstep.h) and presents follow the hold k it decides with it
 __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests have no loader
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
-__attribute__((weak)) void dm_ue_cvar_tick(void) {}   // hle_uecvar.c: Unreal's texture streaming pool (profile ue_texture_pool)
-__attribute__((weak)) int dm_movie_playing(void) { return 0; }   // hle_movie.c: a movie's pictures are being handed out; graphics unit tests have no movie decoder
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
 // then took 17-26 ms a frame and dropped a frame in most windows; a steady 30 instead also lets the device cool. DM_THERMAL_CAP=0 turns it off; the Mac reports no thermal state
@@ -1639,25 +1596,14 @@ static int fps_step_cap(void) {
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
     int thermal = thermal_capped();
-    return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
+    return __atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED) || t <= 30 || thermal ? 30 : 60;
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
-// Engine-native frame limiters have no frame-step state page. Their requested
-// cap still governs presentation, even when the profile uses display pacing.
-static int g_present_cap = -1;
-static int fps_present_cap(void) {
-    if (dm_fps_state) return fps_step_cap();
-    if (g_present_cap < 0) {
-        const char *e=getenv("DM_FPS_TARGET");int t=e?atoi(e):DM_GAME_FPS_TARGET;
-        g_present_cap=t==30||t==60?t:0;
-    }
-    return g_present_cap;
-}
 static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
+int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -1672,12 +1618,12 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) { int c = fps_step_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
 // The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {
     static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
-    int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
+    int hz = g_display_mode && !fps_step_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
     if (hz != hz_was || rate != rate_was) { remainder = 0; hz_was = hz; rate_was = rate; }
     if (hz) {
         int ticks = 1;
@@ -1793,26 +1739,11 @@ static void fstep_tick(const win_t *o, int c) {
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
-// The crop a present shows: the window's own (nvnWindowSetCrop), else the vi layer's (vi::SetLayerCrop, hle_vi.c); on the Switch both become the crop of the buffer queued to the layer.
-// Link's Awakening crops only its layer: in handheld mode it draws 1280x720 into its 1920x1080 window textures and crops the layer to that. A layer crop that does not fit the
-// texture is reported once and the whole texture shown, as before the layer crop was read here. lc receives the layer crop
-void dm_vi_layer_crop(int c[4]);   // hle_vi.c: x, y, w, h the game last cropped its layer to (all 0 = none)
-static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
-    if (win[2] || win[3]) return win;   // the window's own crop (present_crop_rect checks it)
-    dm_vi_layer_crop(lc);
-    if (!lc[2] || !lc[3]) return win;   // no layer crop either: the whole texture
-    if (lc[0] + lc[2] > tw || lc[1] + lc[3] > th) {
-        static int once; if (!once++) LOG("[RED] vi layer crop %d,%d %dx%d does not fit the window texture %dx%d: the present shows the whole texture", lc[0], lc[1], lc[2], lc[3], tw, th);
-        return win;
-    }
-    return lc;
-}
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
-    dm_fps_lock_tick(); dm_ue_cvar_tick();
-    if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
+    dm_fps_lock_tick();
     int c = fps_step_cap();
-    if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
+    if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (__atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED) ? " (prerendered movie)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
     if (c) fstep_tick(o, c);
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     present_cfg(o);
@@ -1835,11 +1766,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     gfx_enter();
     uint64_t t0 = now_ns();
-    if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
-        const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
-        nvn_cap_present(t, crop);   // DM_NVN_CAPTURE (nvn_capture.inc)
-        o->ticket[idx] = mtl_present(t, present_period(o) / 1e9, crop);
-    }
+    if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop);   // enqueue only, return immediately
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
@@ -1971,10 +1898,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
 NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
-// A buffer or pool the CPU has no access to (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) maps to NULL, as in NVN, though the host's storage is CPU memory: EA SPORTS FC 27's Frostbite
-// renderer takes a buffer's GPU address as GetAddress + (its data pointer − Map), with a null data pointer for such a buffer (OpcodeCopySubresource), so a real pointer made the
-// copy's destination address 0 (FATAL buffer copy address is in no memory pool)
-NVN(nvnBufferMap, void *, const NVNbuffer *buf) { return BF(buf)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? NULL : BF(buf)->pool->mem + BF(buf)->off; }
+NVN(nvnBufferMap, void *, const NVNbuffer *buf) { return BF(buf)->pool->mem + BF(buf)->off; }
 NVN(nvnBufferGetSize, size_t, const NVNbuffer *buf) { return (size_t)BF(buf)->size; }
 NVN(nvnBufferGetMemoryPool, NVNmemoryPool *, const NVNbuffer *buf) { return (NVNmemoryPool *)BF(buf)->pool; }
 NVN(nvnBufferGetMemoryOffset, ptrdiff_t, const NVNbuffer *buf) { return (ptrdiff_t)BF(buf)->off; }
@@ -1983,7 +1907,7 @@ NVN(nvnBufferInvalidateMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, s
 
 // Memory pool queries
 NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return (NVNmemoryPoolFlags)((const pool_t *)p)->flags; }
-NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return ((const pool_t *)p)->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? NULL : ((const pool_t *)p)->mem; }   // NULL without CPU access (nvnBufferMap)
+NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return ((const pool_t *)p)->mem; }
 NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { return (size_t)((const pool_t *)p)->size; }
 NVN(nvnMemoryPoolInvalidateMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolSetDebugLabel, void, NVNmemoryPool *p, const char *s) { (void)p; (void)s; }
@@ -2237,13 +2161,6 @@ NVN(nvnMultisampleStateGetSampleLocationsGridEnable, NVNboolean, const NVNmultis
 // Builder and pool queries
 NVN(nvnBufferBuilderGetSize, size_t, const NVNbufferBuilder *b) { return (size_t)((const buf_builder_t *)b)->size; }
 NVN(nvnBufferBuilderGetMemoryOffset, ptrdiff_t, const NVNbufferBuilder *b) { return (ptrdiff_t)((const buf_builder_t *)b)->off; }
-// The storage set with SetStorage (EA SPORTS FC 27's Frostbite renderer reads it back from its texture builders before it initializes the textures). The pool getters return the
-// pool's address, as nvnTextureGetMemoryPool does; the header the prototypes come from declares the builders' by value, so they get no signature check
-NVN_NOPROTO(nvnBufferBuilderGetMemoryPool, NVNmemoryPool *, const NVNbufferBuilder *b) { return (NVNmemoryPool *)((const buf_builder_t *)b)->pool; }
-NVN_NOPROTO(nvnTextureBuilderGetMemoryPool, NVNmemoryPool *, const NVNtextureBuilder *b) { return (NVNmemoryPool *)((const tex_builder_t *)b)->pool; }
-NVN(nvnTextureBuilderGetMemoryOffset, ptrdiff_t, const NVNtextureBuilder *b) { return (ptrdiff_t)((const tex_builder_t *)b)->off; }
-NVN_NOPROTO(nvnEventBuilderGetMemoryPool, NVNmemoryPool *, const NVNeventBuilder *b) { return (NVNmemoryPool *)((const ev_builder_t *)b)->pool; }
-NVN_NOPROTO(nvnEventBuilderGetMemoryOffset, int64_t, const NVNeventBuilder *b) { return ((const ev_builder_t *)b)->off; }
 NVN(nvnTextureBuilderGetTarget, NVNtextureTarget, const NVNtextureBuilder *b) { return (NVNtextureTarget)((const tex_builder_t *)b)->d.target; }
 NVN(nvnTextureBuilderGetWidth, int, const NVNtextureBuilder *b) { return (int)((const tex_builder_t *)b)->d.width; }
 NVN(nvnTextureBuilderGetHeight, int, const NVNtextureBuilder *b) { return (int)((const tex_builder_t *)b)->d.height; }
@@ -2474,7 +2391,7 @@ NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, i
     p_vp_swizzle *r = REC(c, OP_VP_SWIZZLE, p_vp_swizzle); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
-NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }
+NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { (void)c; ONCE_LOG("SetAlphaRef %.3f: the host has no alpha test (ColorStateSetAlphaTest is only recorded)", r); }
 NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f: Metal has only 1-pixel lines", w); }
 NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize: the point size comes from the shader"); }
 NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t en, int idx) { *REC(c, OP_PRIM_RESTART, p_prim_restart) = (p_prim_restart){(en & 0xff) != 0, (uint32_t)idx}; }
