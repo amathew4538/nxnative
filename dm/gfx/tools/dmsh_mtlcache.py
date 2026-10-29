@@ -10,7 +10,6 @@
 import os, re, json, shutil, ctypes, hashlib, threading, subprocess, collections
 
 FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
-OUTPUT = re.compile(r'[0-9a-f]{16}_b\.metal')   # a shader's MSL in dmsh_build.py's outputs: <key>_b.metal
 _clonefile = getattr(ctypes.CDLL(None, use_errno=True), 'clonefile', None)   # APFS copy-on-write copy (no data written); elsewhere a plain copy
 
 
@@ -76,15 +75,14 @@ class Cache:
             if not same: return f'a fresh compile of {stem}.metal differs from its library'
         return None
 
-    def fill(self, mac_dir, ios_dir=None, targets=None):
+    def fill(self, mac_dir, ios_dir=None):
         """Takes the libraries of an earlier build: mac_dir = its Mac b-<chain>/ folder, ios_dir = the iOS folder of the same chain (or None). Returns the lines to print"""
         stamp_file = os.path.join(self.root, 'filled.json')
         try: stamps = json.load(open(stamp_file))
         except (OSError, ValueError): stamps = {}
-        names = set(os.listdir(mac_dir)); stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n))   # not an AppleDouble ._<name> (exFAT / FAT drives)
+        names = set(os.listdir(mac_dir)); stems = sorted(n[:-6] for n in names if n.endswith('_b.metal'))
         todo, notes = {}, []
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
-            if targets is not None and target not in targets: continue   # checking an earlier build compiles samples too
             if target not in self.targets or not d or not os.path.isdir(d): continue
             libs = names if d == mac_dir else set(os.listdir(d))
             have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
