@@ -3391,7 +3391,7 @@ static void shmap_load(void) {
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
     const char *cache = getenv("DM_MTL_CACHE");
     const char *save = getenv("DM_SAVE");
-    g_jit_cache_dir = cache && *cache ? @(cache) : (save && *save ? [[@(save) stringByAppendingPathComponent:@"metal-cache"] stringByAppendingPathComponent:DMSH_CHAIN] : nil);
+    g_jit_cache_dir = cache && *cache ? @(cache) : (save && *save ? [[@(save) stringByAppendingPathComponent:@"metal-cache"] stringByAppendingPathComponent:@DMSH_CHAIN] : nil);
     if (g_jit_cache_dir) [NSFileManager.defaultManager createDirectoryAtPath:g_jit_cache_dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
     // The library's stamp (inputs.tsv, written by a full dmsh_build.py run): the game and the digest of the profile inputs it was built from. The chain version is the same for every
