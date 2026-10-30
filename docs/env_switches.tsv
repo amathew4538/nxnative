@@ -65,8 +65,10 @@ DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second write
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
+DM_METAL_SHADER_MODE	diagnostic	`=jit` keeps Mac MSL source for runtime compilation; `=precompiled` packages Mac metallibs (default)
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
+DM_MTL_CACHE	path	Folder for the runtime Metal shader source cache (default: the game's save folder)
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)
