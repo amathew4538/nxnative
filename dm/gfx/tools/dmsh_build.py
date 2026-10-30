@@ -13,7 +13,7 @@ import dmsh_geometry, dmsh_atomic
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_mesh   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = dmsh_chain.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run dmsh_chain.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -25,6 +25,11 @@ SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
 IOSOUT = os.environ.get('IOSOUT')   # if set, also build the iOS version (iphoneos metallib + reflection) into that directory
+# Sources and reflection are always written; DMSH_TARGETS selects which compiled libraries are produced.
+TARGETS = {t.strip() for t in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if IOSOUT else 'mac')).split(',') if t.strip()}
+if not TARGETS or not TARGETS <= {'mac', 'ios'}: sys.exit(f'[RED] DMSH_TARGETS takes mac and/or ios: {",".join(sorted(TARGETS)) or "empty"}')
+if 'ios' in TARGETS and not IOSOUT: sys.exit('[RED] DMSH_TARGETS asks for iOS libraries without IOSOUT')
+if 'ios' not in TARGETS: IOSOUT = None
 if IOSOUT:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
@@ -34,6 +39,8 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):   # one chain version serves eve
 MAP = str(GAME.table('shader_map.tsv'))
 BF_WANT_FILE = str(GAME.table('bf_want.tsv'))
 BF_WANT = {line.strip() for line in open(BF_WANT_FILE) if line.strip() and not line.lstrip().startswith('#')} if os.path.exists(BF_WANT_FILE) else set()
+DUAL_WANT_FILE = str(GAME.table('dual_want.tsv'))
+DUAL_WANT = {line.split()[0] for line in open(DUAL_WANT_FILE) if line.strip() and not line.lstrip().startswith('#')} if os.path.exists(DUAL_WANT_FILE) else set()
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', '--msl-pad-fragment-output']
 # spirv-cross writes the translator's FMin / FMax / FClamp as fast::min / max / clamp, whose result for a NaN operand is the GPU's choice; Maxwell's FMNMX returns the other operand
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
@@ -42,6 +49,7 @@ def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
+ALPHA_STATS = collections.Counter()
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
 # Super Mario Odyssey draws a depth pre-pass with alRenderDepthOnly, then the G-buffer with another vertex shader and depth test less-or-equal: a hair off and the test failed, leaving those pixels with old content (Cap Kingdom's ground in 32x32 blocks)
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
@@ -72,7 +80,7 @@ class RuntimeMetal:
 
     def fill(self, mac_dir, ios_dir=None, targets=None):
         if not getattr(self, 'ios', None) or not ios_dir or not os.path.isdir(ios_dir): return []
-        return self.ios.fill(mac_dir, ios_dir, targets={'ios'})
+        return self.ios.fill(mac_dir, ios_dir)
 
     def summary(self):
         return 'Metal cache: mac runtime source compilation' + (f'; {self.ios.summary()}' if hasattr(self, 'ios') else '')
@@ -146,10 +154,10 @@ def cache_outputs(key, digest, cached=False):
         if not directory: continue
         # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
         required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
-        if label == 'ios' or (label == 'mac' and globals().get('MAC_PRECOMPILE', 'mac' in TARGETS)): required.append(key + '_b.metallib')
+        if label == 'ios' or (label == 'mac' and MAC_PRECOMPILE and 'mac' in TARGETS): required.append(key + '_b.metallib')
         base = os.path.join(root, label) if cached else directory
         names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
-                            if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label == 'ios' or globals().get('MAC_PRECOMPILE', 'mac' in TARGETS))]
+                            if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label == 'ios' or (MAC_PRECOMPILE and 'mac' in TARGETS))]
         found = [n for n in names if os.path.exists(os.path.join(base, n))]
         if key + '_b.metal' not in found or key + '_b.json' not in found: return None
         files[label] = found
@@ -209,10 +217,10 @@ def bf_cache_root(digest): return os.path.join(CAS, 'variant', digest)
 
 def bf_cache_restore(key, digest, fmeta, fmsl):
     root = bf_cache_root(digest)
-    names = ['metal'] + (['mac.metallib'] if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS) else []) + (['ios.metallib'] if IOSOUT else [])
+    names = ['metal'] + (['mac.metallib'] if MAC_PRECOMPILE and 'mac' in TARGETS else []) + (['ios.metallib'] if IOSOUT else [])
     if not all(os.path.exists(os.path.join(root, n)) for n in names): return False
     clone(os.path.join(root, 'metal'), fmsl)
-    if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): clone(os.path.join(root, 'mac.metallib'), os.path.join(out, key + '_bf.metallib'))
+    if MAC_PRECOMPILE and 'mac' in TARGETS: clone(os.path.join(root, 'mac.metallib'), os.path.join(out, key + '_bf.metallib'))
     if IOSOUT: clone(os.path.join(root, 'ios.metallib'), os.path.join(IOSOUT, key + '_bf.metallib'))
     BF_STATS['hit'] += 1
     return True
@@ -247,7 +255,7 @@ def fetch_finish(key, src, refl):
             if not bf_cache_restore(key, digest, fmeta, fmsl):
                 BF_STATS['miss'] += 1
                 open(fmsl, 'w').write(fv)
-                fair = fmsl[:-6] + '.air'; flib = os.path.join(out, key + '_bf.metallib') if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS) else None
+                flib = os.path.join(out, key + '_bf.metallib') if MAC_PRECOMPILE and 'mac' in TARGETS else None
                 try:
                     if IOSOUT:
                         ilib = os.path.join(IOSOUT, key + '_bf.metallib')
@@ -256,7 +264,7 @@ def fetch_finish(key, src, refl):
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     return refl
                 BF_STATS['compile'] += 1
-                if os.path.exists(flib):
+                if flib and os.path.exists(flib):
                     bf_cache_publish(digest, fmsl, flib, ilib, fmeta)
         finally:
             for path in (fmsl[:-6] + '.air', fmsl[:-6] + '.ios.air'):
@@ -287,7 +295,7 @@ def pull_finish(key, full, refl):
         drop(); return refl
     msl = os.path.join(w, key + '_bp.metal'); open(msl, 'w').write(v)
     try:
-        if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): MTL.compile('mac', msl, libs[0])
+        if MAC_PRECOMPILE and 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
         if IOSOUT: MTL.compile('ios', msl, libs[1])
     except subprocess.CalledProcessError as e:
         PULL_STATS['failed'] += 1; print(f'[RED] {key}: the pulling library does not compile ({str(e)[:120]}): its pipelines are always built for the draw\'s vertex layout', flush=True)
@@ -319,7 +327,7 @@ def vin_finish(key, full, refl):
     VIN_STATS['generated'] += 1
     msl = os.path.join(w, key + '_bv.metal'); open(msl, 'w').write(v)
     try:
-        if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): MTL.compile('mac', msl, libs[0])
+        if MAC_PRECOMPILE and 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
         if IOSOUT: MTL.compile('ios', msl, libs[1])
     except subprocess.CalledProcessError as e:
         VIN_STATS['failed'] += 1; print(f'[RED] {key}: the shadow-input library does not compile ({str(e)[:120]}): its integer inputs keep the CPU conversion', flush=True)
@@ -348,7 +356,7 @@ def alpha_finish(key, full, refl):
     if not v: ALPHA_STATS['not generated'] += 1; drop(); return refl
     msl = os.path.join(w, key + '_ba.metal'); open(msl, 'w').write(v)
     try:
-        if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): MTL.compile('mac', msl, libs[0])
+        if MAC_PRECOMPILE and 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
         if IOSOUT: MTL.compile('ios', msl, libs[1])
     except subprocess.CalledProcessError as e:
         ALPHA_STATS['failed'] += 1; print(f'[RED] {key}: the alpha test library does not compile ({str(e)[:120]}): its alpha-tested draws go without the test', flush=True)
@@ -825,6 +833,19 @@ def fs_uint(src):
         mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in from_int)
     return out, mask
 
+def fs_dual(src):
+    """Create the dual-source entry point used by pipelines that blend with output 1."""
+    m = re.search(r'^.*\bfragment\s+main0_out\s+main0\s*\(', src, re.M)
+    st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
+    if not m or not st: return None
+    mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
+    if sorted(at for _, _, at in mem if 'color(' in at) != ['[[color(0)]]', '[[color(1)]]']: return None
+    struct = 'struct main0_out_d\n{\n' + ''.join(
+        f'    {ty} {nm} {"[[color(0), index(1)]]" if at == "[[color(1)]]" else at};\n'
+        for ty, nm, at in mem) + '};\n\n'
+    ret = 'return main0_out_d{' + ', '.join(f'out.{nm}' for _, nm, _ in mem) + '};'
+    return '\n' + struct + re.sub(r'\bfragment\s+main0_out\s+main0\s*\(', 'fragment main0_out_d main0_d(', src[m.start():], count=1).replace('return out;', ret)
+
 SG_OPS = {333: 'true', 334: 'pred', 335: 'pred', 336: 'true', 337: 'value', 338: 'value', 339: 'ballot', 345: 'value', 346: 'value', 347: 'value', 348: 'value'}   # OpGroupNonUniform* → its one-lane value
 SG_BUILTINS = {36: 'one', 41: 'zero', 4416: 'one4', 4417: 'one4', 4418: 'zero4', 4419: 'one4', 4420: 'zero4'}   # SubgroupSize, SubgroupLocalInvocationId, Eq / Ge / Gt / Le / Lt masks
 def spv_single_lane(path):
@@ -914,7 +935,7 @@ def geometry_finish(key, w, j, c1):
                 'bindings': reflect(key, 'gs', src, res), 'vertex_inputs': [], 'raster': {}}
         def save(suffix, text, meta):
             path = os.path.join(out, key + suffix + '.metal'); open(path, 'w').write(text)
-            if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): MTL.compile('mac', path, os.path.join(out, key + suffix + '.metallib'))
+            if MAC_PRECOMPILE and 'mac' in TARGETS: MTL.compile('mac', path, os.path.join(out, key + suffix + '.metallib'))
             atomic_json(os.path.join(out, key + suffix + '.json'), MTL.with_compiler('mac', meta))
             if IOSOUT:
                 MTL.compile('ios', path, os.path.join(IOSOUT, key + suffix + '.metallib'))
@@ -990,7 +1011,7 @@ def finish(key, w, j, c1):
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
-        if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): MTL.compile('mac', msl, lib)
+        if MAC_PRECOMPILE and 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
     except subprocess.CalledProcessError as e:
@@ -1043,8 +1064,7 @@ for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + 
     _mac, _, _ios = _spec.partition('=')
     for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
         if _b.startswith('b-') and os.path.realpath(os.path.join(_mac, _b)) != os.path.realpath(out):
-            _fill_targets = TARGETS - ({'mac'} if not MAC_PRECOMPILE else set())
-            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=_fill_targets): print(_ln, flush=True)
+            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None): print(_ln, flush=True)
 packs, jobs, c1s = {}, {}, {}
 digests, rule_fps, cache_reasons, cache_hits = {}, {}, {}, set()
 def rec_of(key):   # → (package name, the shader's record)
@@ -1099,7 +1119,7 @@ def mesh_finish(pair):
     except ValueError as e: MESH_STATS['not composed'] += 1; print(f'[RED] mesh {vk} {gk}: {e}', flush=True); return
     path = os.path.join(w, f'{vk}_{gk}_m3.metal'); open(path, 'w').write(msl)
     try:
-        if globals().get('MAC_PRECOMPILE', 'mac' in TARGETS): MTL.compile('mac', path, libs[0])
+        if MAC_PRECOMPILE and 'mac' in TARGETS: MTL.compile('mac', path, libs[0])
         if IOSOUT: MTL.compile('ios', path, libs[1])
         MESH_STATS['built'] += 1
     except subprocess.CalledProcessError as e: MESH_STATS['failed to compile'] += 1; print(f'[RED] mesh {vk} {gk}: does not compile ({str(e)[:120]})', flush=True)

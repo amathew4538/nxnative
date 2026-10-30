@@ -184,7 +184,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
-- **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).
+- **Resolved build guard and cache isolation; rendering cause open:** [Pipelines and caches](../../../docs/reference/shaders.md#pipelines-and-caches).
 
 General host changes first needed here; each applies to every game:
 

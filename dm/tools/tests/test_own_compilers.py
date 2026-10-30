@@ -8,7 +8,6 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
-import dmsh_chain  # noqa: E402
 import own_compilers  # noqa: E402
 
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')

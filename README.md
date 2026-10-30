@@ -55,7 +55,7 @@ Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore,
 
 Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)).
 
-Controls, saves and settings: [Playing](docs/playing.md).
+Controls, saves and settings: [Playing](#play).
 
 ## Games
 
