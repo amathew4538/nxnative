@@ -140,3 +140,11 @@ def frame_step(ctx):
     fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': '60 fps frame step and render scale', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own timing object",
+     'blocked': 'frame-step stubs have no function-matched form yet'},
+]
