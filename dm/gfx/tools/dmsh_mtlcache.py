@@ -22,6 +22,8 @@ def clone(src, dst):
 
 
 def compiler_id(sdk):
+    if os.environ.get('DM_METAL_SHADER_MODE') == 'jit' and sdk == 'macosx':
+        return 'jit'
     def run(*a): return subprocess.run(['xcrun', '-sdk', sdk, *a], capture_output=True, text=True).stdout
     tools = ''.join(run(t, '--version') for t in ('metal', 'metallib'))
     return re.sub(r'(?m)^InstalledDir:.*\n?', '', tools) + run('--show-sdk-version') + run('--show-sdk-build-version')   # the install path changes with each toolchain mount
@@ -52,6 +54,8 @@ class Cache:
 
     def compile(self, target, msl, lib):
         """msl → lib for target: a clone of the library that the same source compiled to before, or a compile (then kept). Raises CalledProcessError as the compile does"""
+        if os.environ.get('DM_METAL_SHADER_MODE') == 'jit' and target == 'mac':
+            clone(msl, lib[:-len('.metallib')] + '.metal'); self.count((target, 'source')); return
         p = self.path(target, open(msl, 'rb').read())
         if os.path.exists(p):
             clone(p, lib); self.count((target, 'reused')); return
@@ -63,6 +67,10 @@ class Cache:
     def compile_split(self, target, msl, a, b, split):
         """msl → two libraries cut from its one compile, split(the library's bytes) → (a's bytes, b's bytes): clones of what the same source gave before, or a compile (then both kept, not the whole
         library, so an output stays a clone as compile's are). Raises CalledProcessError as the compile does, and what split raises"""
+        if os.environ.get('DM_METAL_SHADER_MODE') == 'jit' and target == 'mac':
+            clone(msl, a[:-len('.metallib')] + '.metal')
+            clone(msl, b[:-len('.metallib')] + '.metal')
+            self.count((target, 'source')); return
         p = self.path(target, open(msl, 'rb').read()); q = p[:-len('.metallib')] + '_x.metallib'
         if os.path.exists(p) and os.path.exists(q):
             clone(p, a); clone(q, b); self.count((target, 'reused')); return
