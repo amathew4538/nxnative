@@ -57,6 +57,10 @@ class CheckTools(unittest.TestCase):
         with mock.patch.object(own_compilers.subprocess, 'run', side_effect=FileNotFoundError):
             self.assertEqual(own_compilers.selected_xcode(), '')
 
+    def test_missing_xcrun_is_a_missing_compiler(self):
+        with mock.patch.object(own_compilers.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertEqual(own_compilers.metal_version('macosx'), 'missing')
+
     def test_other_metal_allowed(self):
         bad, out = self.check([mismatch('metal_macosx', OTHER), mismatch('metal_iphoneos', OTHER)], allow=True)
         self.assertEqual(bad, [])
@@ -112,11 +116,16 @@ class NspScript(unittest.TestCase):
             nsp.check_metal(sys.executable, REPO, {})
         run.assert_not_called()
 
+    def test_jit_skips_the_metal_check(self):
+        with mock.patch.object(nsp, 'METAL_SHADER_MODE', 'jit'), mock.patch.object(nsp.subprocess, 'run') as run:
+            nsp.check_metal(sys.executable, REPO, {}, mac=True)
+        run.assert_not_called()
+
     def test_check_metal_runs(self):   # the real tool with the real lock: exit 0 or 1 with the message, never a traceback (no Xcode: no compiler, which dmsh_build.py reports)
         r = subprocess.run([sys.executable, str(REPO / 'dm/gfx/tools/own_compilers.py'), '--check-metal'], capture_output=True, text=True,
                            env={k: v for k, v in os.environ.items() if k != own_compilers.ALLOW})
         self.assertIn(r.returncode, (0, 1), r.stderr)
-        if r.returncode: self.assertIn(f'Xcode {own_compilers.XCODE_VERSION}', r.stdout)
+        if r.returncode: self.assertIn(f'Xcode {own_compilers.XCODE_VERSION}', r.stdout or r.stderr)
 
     def test_flag(self):
         self.assertTrue(nsp.parse_args(['x', '--allow-other-metal']).allow_other_metal)
