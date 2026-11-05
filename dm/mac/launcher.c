@@ -133,6 +133,32 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
     }
 }
 
+// Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
+// (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
+static void cloud_saves_folder(void) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    if (getenv("DM_SAVE_SYNC") || !domain) return;
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("cloudSaves.folder"), domain); char s[PATH_MAX];
+    if (v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8) && *s) {
+        setenv("DM_SAVE_SYNC", s, 1); fprintf(stderr, "launcher: cloud saves through %s\n", s);
+    }
+    if (v) CFRelease(v);
+}
+
+// A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
+static void programs_table(const char *contents, const char *res, const char *sup) {
+    char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
+    FILE *f = fopen(in, "r"); if (!f) return;
+    FILE *o = fopen(out, "w"); if (!o) { fprintf(stderr, "[RED] launcher: cannot write %s\n", out); fclose(f); return; }
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c != '@') { fputc(c, o); continue; }
+        int k = fgetc(f), e = fgetc(f); const char *v = k == 'R' ? res : k == 'C' ? contents : k == 'S' ? sup : NULL;
+        if (v && e == '@') fputs(v, o); else { fputc(c, o); if (k != EOF) fputc(k, o); if (e != EOF) fputc(e, o); }
+    }
+    fclose(f); fclose(o); setenv("DM_PROGRAMS", out, 0);
+}
+
 int main(int argc, char **argv) {
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
@@ -185,6 +211,7 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
+    programs_table(contents, res, sup);
     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);

@@ -1,5 +1,6 @@
 // Geometry assembly, GPU strip compaction, and production capture/compute/raster replay.
 #include "../nvn/nvn_mtl.m"
+#include "host_msl_gen.h"   // the geometry packing source (dm/gfx/msl/geo_pack.metal), which these tests extend
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
@@ -97,7 +98,7 @@ static void cpu_read_proofs(void) {
     pend_reset();memset(g_gw,0,sizeof g_gw);state_reset();
 }
 static void pack_test(void) {
-    id<MTLLibrary> l=library(@(k_nvn_geo_pack_msl)); NSError *e=nil;
+    id<MTLLibrary> l=library(@(k_host_msl_src_geo_pack)); NSError *e=nil;
     id<MTLComputePipelineState> p[3]; const char *fn[3]={"geo_pack_count","geo_pack_scan","geo_pack_write"};
     for(int i=0;i<3;i++) { p[i]=[g_dev newComputePipelineStateWithFunction:[l newFunctionWithName:@(fn[i])] error:&e]; if(!p[i]) abort(); }
     uint32_t data[]={0,1,2,3,UINT32_MAX,4,5,6, UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX, 8,9,10,UINT32_MAX,11,12,13,UINT32_MAX};
@@ -117,10 +118,45 @@ static void pack_test(void) {
         EXPECT("output bound sentinel",0xcccccccc,((uint32_t*)((char*)b.contents+512))[args[0]]);
     }
 }
+static void fast_pack_test(void) {
+    id<MTLLibrary> lib=library(@(k_host_msl_src_geo_pack));NSError *error=nil;
+    id<MTLComputePipelineState> small=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"geo_pack_small"] error:&error];
+    id<MTLComputePipelineState> scan=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"geo_pack_scan"] error:&error];
+    EXPECT("fused compaction pipeline",1,small!=nil);EXPECT("parallel scan pipeline",1,scan!=nil);if(!small||!scan)abort();
+    id<MTLBuffer> b=[g_dev newBufferWithLength:131072 options:MTLResourceStorageModeShared];res_add(b);
+    const unsigned sizes[]={0,1,31,32,63,64,65,127,128,129,257,1023,1024};
+    for(unsigned test=0;test<sizeof sizes/sizeof *sizes;test++)for(int kind=0;kind<3;kind++)for(int limited=0;limited<2;limited++) {
+        unsigned groups=sizes[test],width=kind==0?1:kind==1?2:3,topology=kind==0?1:kind==1?6:7;
+        memset(b.contents,0xcc,b.length);uint32_t *src=b.contents,reference[24576];size_t n=0;
+        for(unsigned g=0;g<groups;g++) {
+            for(unsigned k=0;k<8;k++)src[g*8+k]=k<g%9&&k!=3?g*8+k:UINT32_MAX;
+            n+=nvn_geo_assemble(kind==0?0:kind==1?3:5,src+g*8,8,1,UINT32_MAX,reference+n,24576-n);
+        }
+        unsigned capacity=limited?37:(unsigned)n+11,expected=MIN((unsigned)n,capacity-capacity%width);
+        nvn_geo_pack_job job={b.gpuAddress,b.gpuAddress+32768,b.gpuAddress+98304,groups,8,topology,capacity,b.gpuAddress+100352};
+        memcpy((char*)b.contents+102400,&job,sizeof job);mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,small);enc_c_args(ce,b.gpuAddress+102400,0);enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(128,1,1));enc_c_end(ce);finish();
+        uint32_t *dst=(uint32_t*)((char*)b.contents+32768),*args=(uint32_t*)((char*)b.contents+98304);
+        EXPECT("fused count includes complete primitives only",expected,args[0]);EXPECT("fused order matches CPU assembly",0,memcmp(dst,reference,expected*4));
+        EXPECT("fused output bound sentinel",0xcccccccc,dst[expected]);EXPECT("fused indirect instance count",1,args[1]);
+        EXPECT("fused indirect offsets stay zero",0,args[2]|args[3]|args[4]);EXPECT("fused compaction does not use global scratch",0xcccccccc,*(uint32_t*)((char*)b.contents+100352));
+    }
+    // More block totals than GPU lanes, with uneven chunks and clipping.
+    enum { BLOCKS=16387,GROUPS=BLOCKS*64-19 };
+    id<MTLBuffer> big=[g_dev newBufferWithLength:(GROUPS+BLOCKS+128)*4u options:MTLResourceStorageModeShared];res_add(big);
+    for(int kind=0;kind<3;kind++)for(int limited=0;limited<2;limited++) {
+        memset(big.contents,0xcc,big.length);uint32_t *tot=(uint32_t*)big.contents+GROUPS;uint32_t reference[BLOCKS],sum=0;
+        for(unsigned k=0;k<BLOCKS;k++){reference[k]=sum;tot[k]=(k%17)*(kind+1);sum+=tot[k];}
+        nvn_geo_pack_job job={0,0,b.gpuAddress+98304,GROUPS,8,kind==0?1:kind==1?6:7,limited?37:sum+7,big.gpuAddress};memcpy((char*)b.contents+102400,&job,sizeof job);
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+102400,0);enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(128,1,1));enc_c_end(ce);finish();
+        EXPECT("parallel chunk prefix matches literal CPU scan",0,memcmp(tot,reference,sizeof reference));
+        EXPECT("parallel scan bound sentinel",0xcccccccc,tot[BLOCKS]);unsigned w=kind+1;EXPECT("parallel scan indirect count",limited?37-37%w:sum,*(uint32_t*)((char*)b.contents+98304));
+    }
+}
+
 static void pack_dependency_test(uint32_t groups) {
     // A GPU producer and all three production compaction dispatches share one
     // encoder. Compare every output and offset with an independent CPU list.
-    NSString *source=[@(k_nvn_geo_pack_msl) stringByAppendingString:@"\nstruct E{device uint*raw;uint groups;};\n"
+    NSString *source=[@(k_host_msl_src_geo_pack) stringByAppendingString:@"\nstruct E{device uint*raw;uint groups;};\n"
         "kernel void produce(constant E&e[[buffer(0)]],uint g[[thread_position_in_grid]]){if(g>=e.groups)return;"
         "for(uint i=0;i<8;i++)e.raw[g*8+i]=(g%5&&i<4)?g*4+i:0xffffffffu;}\n"];
     id<MTLLibrary> lib=library(source);NSError *error=nil;id<MTLComputePipelineState> pack[3];
@@ -156,7 +192,7 @@ static void pack_dependency_test(uint32_t groups) {
     free(want);free(offsets);
 }
 static void scan_edges(void) {
-    id<MTLLibrary> lib=library(@(k_nvn_geo_pack_msl));NSError *error=nil;
+    id<MTLLibrary> lib=library(@(k_host_msl_src_geo_pack));NSError *error=nil;
     id<MTLComputePipelineState> scan=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"geo_pack_scan"] error:&error];if(!scan)abort();
     id<MTLBuffer> b=[g_dev newBufferWithLength:32768 options:MTLResourceStorageModeShared];res_add(b);
     const uint32_t sizes[]={0,1,2,31,32,33,63,64,65,255,256,257,1023},threads[]={1,32,192,256};uint32_t want[1023];
@@ -194,7 +230,7 @@ static void passthrough_bounds(NSArray *layouts) {
     // header-only metadata overwrites both canaries and compacts the wrong span.
     const uint32_t vertices[]={1,2,2,3,3};const int groups=3;
     EXPECT("five passthrough topology layouts",5,layouts.count);if(layouts.count!=5)return;
-    id<MTLLibrary> packlib=library(@(k_nvn_geo_pack_msl));NSError *error=nil;
+    id<MTLLibrary> packlib=library(@(k_host_msl_src_geo_pack));NSError *error=nil;
     id<MTLComputePipelineState> pack[3];const char *names[]={"geo_pack_count","geo_pack_scan","geo_pack_write"};
     for(int i=0;i<3;i++){pack[i]=[g_dev newComputePipelineStateWithFunction:[packlib newFunctionWithName:@(names[i])] error:&error];if(!pack[i])abort();}
     id<MTLBuffer> b=[g_dev newBufferWithLength:32768 options:MTLResourceStorageModeShared];res_add(b);
@@ -262,7 +298,7 @@ static void passthrough_kernels(const char *directory) {
     const uint32_t widths[]={1,2,4,3,6},vertices[]={1,2,2,3,3};
     const uint32_t source_vertex[5][3]={{0},{0,1},{1,2},{0,1,2},{0,2,4}};
     const uint32_t primitives=3,instances=2,groups=primitives*instances;
-    id<MTLLibrary> packlib=library(@(k_nvn_geo_pack_msl));NSError *error=nil;
+    id<MTLLibrary> packlib=library(@(k_host_msl_src_geo_pack));NSError *error=nil;
     id<MTLComputePipelineState> pack[3];const char *names[]={"geo_pack_count","geo_pack_scan","geo_pack_write"};
     for(int i=0;i<3;i++){pack[i]=[g_dev newComputePipelineStateWithFunction:[packlib newFunctionWithName:@(names[i])] error:&error];if(!pack[i])abort();}
     for(int t=0;t<5;t++) {

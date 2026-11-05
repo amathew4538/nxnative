@@ -147,6 +147,50 @@ int main(void) { @autoreleasepool {
         EXPECT("stream 15 readback", 33, pixels[row * 4 + 2]);
         EXPECT("zero buffer readback", 0, pixels[row * 4 + 3]);
     }
+    // A 3-vertex draw of 12-byte RGB32F elements from a stream bound with 12 bytes: vertices 1 and 2 read zeros, though the pool holds other words there,
+    // through the vertex table and the pulling layout alike; a draw inside the range binds the stream itself
+    uint32_t *tri = mem + 128; for (int i = 0; i < 9; i++) tri[i] = 0x1000u + (uint32_t)i;
+    nvn_refl rf; memset(&rf, 0, sizeof rf); rf.nv = 1; rf.v[0].nvn = 0;
+    S.nattr = 1; S.attr[0] = (va_st){.fmt = 0x22, .offset = 0, .stream = 0}; S.stream[0].stride = 12; S.stream[0].divisor = 0;
+    S.vbuf[0].address = (uint64_t)tri; S.vbuf[0].size = 12;
+    p_draw dw = {.prim = 4, .first = 0, .count = 3, .instances = 1};
+    mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
+    EXPECT("bytes the draw reads past the bound size", 36, g_vbuf_need[0]);
+    en = encoder_prepared(tail); bind_vbufs(en); capture(en, out, 22);
+    pull_layout L; pull_layout_fill(&L);
+    EXPECT("pulling layout reads the padded copy", g_vt_addr[VB_SLOT(0)] & ~3ull, L.s[0].base);
+    enc_r_end(en); finish();
+    EXPECT("padded stream copied once", 1, g_vbuf_copies - copies);
+    EXPECT("vertex 0 inside the bound range", 0x1000u, ((const uint32_t *)out.contents)[22 * 4]);
+    EXPECT("vertex 1 past the bound range reads zero", 0, ((const uint32_t *)out.contents)[22 * 4 + 1]);
+    EXPECT("vertex 2 past the bound range reads zero", 0, ((const uint32_t *)out.contents)[22 * 4 + 2]);
+    EXPECT("vertex 2's last word reads zero", 0, ((const uint32_t *)out.contents)[22 * 4 + 3]);
+    dw.count = 1; mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
+    EXPECT("a draw inside the bound range needs no copy", 0, g_vbuf_need[0]);
+    en = encoder_prepared(tail); bind_vbufs(en); capture(en, out, 23); enc_r_end(en); finish();
+    EXPECT("in-range stream bound as it is", 0, g_vbuf_copies - copies);
+    EXPECT("in-range stream reads the pool", 0x1003u, ((const uint32_t *)out.contents)[23 * 4 + 1]);
+    S.stream[0].divisor = 1; p_draw inst = {.prim = 4, .first = 0, .count = 1, .instances = 2, .base_instance = 1};
+    vbuf_prepare(&rf, &inst, NULL); EXPECT("per-instance stream: base instance + last instance", 36, g_vbuf_need[0]);
+    p_draw_idx ix = {.prim = 4, .itype = 1, .count = 3, .instances = 2, .base_instance = 0, .ibuf = (uint64_t)mem};
+    vbuf_prepare(&rf, NULL, &ix); EXPECT("indexed draw: per-instance stream bounded", 24, g_vbuf_need[0]);
+    S.stream[0].divisor = 0; vbuf_prepare(&rf, NULL, &ix); EXPECT("indexed draw: per-vertex stream not scanned", 0, g_vbuf_need[0]);
+    dw.count = 3; dw.ind = (uint64_t)mem; vbuf_prepare(&rf, &dw, NULL); EXPECT("indirect draw: not known on the CPU", 0, g_vbuf_need[0]);
+    S.stream[0].stride = 0; dw.ind = 0; S.vbuf[0].size = 8; vbuf_prepare(&rf, &dw, NULL); EXPECT("stride 0: one element", 12, g_vbuf_need[0]);
+    // A stream bound with size 0 at an unaligned address: no bytes to align, so no copy and no red line while nothing reads it; a draw that reads it gets zeros
+    S.nattr = 0; S.vbuf[0] = (NVNbufferRange){1, 0}; unsigned reds = g_red_once[120];
+    mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(NULL, NULL, NULL);
+    en = encoder_prepared(tail); bind_vbufs(en); enc_r_end(en); finish();
+    EXPECT("an unread empty stream is not copied", 0, g_vbuf_copies - copies);
+    EXPECT("an unread empty stream logs no red line", reds, g_red_once[120]);
+    S.nattr = 1; S.stream[0].stride = 12; S.vbuf[0] = (NVNbufferRange){(uint64_t)tri + 1, 0}; dw.count = 3;
+    mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
+    EXPECT("a draw reads past an empty stream", 36, g_vbuf_need[0]);
+    en = encoder_prepared(tail); bind_vbufs(en); capture(en, out, 24); enc_r_end(en); finish();
+    EXPECT("the read empty stream is copied once", 1, g_vbuf_copies - copies);
+    for (int i = 0; i < 4; i++) EXPECT("the read empty stream reads zero", 0, ((const uint32_t *)out.contents)[24 * 4 + i]);
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)tri, 8};
+    S.nattr = 0; S.stream[0].stride = 0; vbuf_prepare(NULL, NULL, NULL);
     // CPU-only binding microbenchmark, after GPU validation; reports overhead, not game frame time.
     for (int mode = 0; mode < 2; mode++) {
         g_vbuf_cache = mode; bind_vbufs(nil); uint64_t start = bp_now(), r = g_vbuf_resolve, w = g_vbuf_set;

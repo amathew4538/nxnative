@@ -26,6 +26,7 @@ struct dm_flags g_flag;
 uint64_t unimpl_stubs[MAX_STUB];
 uint64_t now_ns(void) { return 0; }
 uint64_t guest_ns(void) { return 0; }
+uint64_t guest_ticks(void) { return 0; }
 void guest_clock_read_wait(void) {}
 void hlecount_seal(void) {}
 void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
