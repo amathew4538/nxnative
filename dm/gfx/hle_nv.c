@@ -7,6 +7,8 @@ typedef void (*nv_free_fn)(void *p, void *user);
 typedef void *(*nv_realloc_fn)(void *p, unsigned long size, void *user);
 struct nv_allocator { nv_alloc_fn alloc; nv_free_fn free; nv_realloc_fn realloc; void *user; };
 struct nv_allocator g_nv_alloc, g_nv_devtools_alloc;
+// The graphics pool the game installs (nv::MemoryInfo reports on it). Nothing is allocated from it on the host: the graphics layer allocates its own Metal objects
+static struct { void *mem; unsigned long size; int inited; } g_nv_pool;
 
 #define WHY "NVN has been replaced wholesale with a host null device, so the driver glue layer has nothing to do"
 HLE_FORCE("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", WHY "; allocator recorded in g_nv_alloc",

@@ -1,6 +1,7 @@
 // The command header layout is taken from the first command list that walks in one, not from the first list generated.
 // Mario Kart 8 Deluxe (SDK 4.4.0): the render thread generated a list before the game's first RequestUpdate whose third command was zeroed; taking the layout from it
 // left the SDK 6 headers read in the newer layout, no DeviceSink was found and the game was silent. Also check recovery with the other supported headers and sinks.
+// Bastion (SDK 5.4.0): its first list, two commands with the SDK 6 header whose first has ID 0x14 and 0x14 bytes, walks in the SDK 8–20 layout too and must decide nothing.
 #include "../hle.h"
 #include <assert.h>
 #include <sys/wait.h>
@@ -41,9 +42,9 @@ static size_t build(int sdk, int ncmd) {
     *(uint32_t *)(list + 4) = (uint32_t)ncmd; *(const int32_t **)(list + 8) = mix; *(uint32_t *)(list + 0x14) = SAMPLES; *(uint32_t *)(list + 0x18) = 48000;
     uint8_t *q = list + 0x20;
     for (int i = 0; i < ncmd - 1; i++) q = put(q, sdk, 6, 0x40);
-    int id = sdk == 4 ? 0xf : sdk == 6 ? 0x10 : sdk == 21 ? 0x14 : 0x13;
-    uint8_t *sink = q; q = put(q, sdk, id, sdk == 4 ? 0x130 : sdk == 21 ? 0x140 : 0x148);
-    int count = sdk == 4 ? 0x120 : sdk == 21 ? 0x128 : 0x130;
+    int id = sdk <= 5 ? 0xf : sdk == 6 ? 0x10 : sdk == 21 ? 0x14 : 0x13;
+    uint8_t *sink = q; q = put(q, sdk, id, sdk == 4 ? 0x130 : sdk == 5 ? 0x138 : sdk == 21 ? 0x140 : 0x148);
+    int count = sdk <= 5 ? 0x120 : sdk == 21 ? 0x128 : 0x130;
     *(uint32_t *)(sink + count) = 2;
     if (sdk == 4) { sink[0x124] = 0; sink[0x125] = 1; }
     else { *(int16_t *)(sink + count + 4) = 0; *(int16_t *)(sink + count + 6) = 1; }

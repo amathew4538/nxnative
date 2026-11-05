@@ -2,11 +2,20 @@
 
 The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/sdk_patches.py`, a profile's `patches.py`). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Disassembler dependencies
+
+### Capstone API version
+
+- **Symptom:** `NameError: name 'CS_ARCH_ARM64' is not defined` at the start of `patch_nso.py`; now `[RED] Capstone 6.… is unsupported` from the NSP script or `patch_nso.py`.
+- **Cause:** Capstone 6 renames the architecture to `CS_ARCH_AARCH64` and the operand constants (`ARM64_OP_*`); the rewriter uses the Capstone 5 API. PyPI's Capstone 6 releases are pre-releases (6.0.0a…), so a plain `pip install capstone` gets 5.x; a `--pre` install or another package's requirement brings in 6.
+- **Fix:** install `capstone>=5,<6` (README and CI). `patch_nso.py` checks the major version (`cs_version()`) before it disassembles anything, and the NSP script checks it before building or surveying, so the extraction is not wasted; both print the install command for the Python that runs them. Capstone 6 is not supported.
+- **Found on:** [Celeste](../../dm/games/01002B30028F6000/README.md#found-on-this-game).
+
 ## Patches across updates
 
 ### Function-matched cuts for unregistered builds
 
-- **Symptom:** an updated game loses a needed cut because its NSO build ID changed, although the relevant code still matches a verified version; the rewriter reports `[RED] function patch ... skipped` when that match cannot be established.
+- **Symptom:** an updated game loses a needed cut because its NSO build ID changed, although the relevant code still matches a verified version; the rewriter reports `[RED] function patch ... skipped` when that match cannot be established, and the NSP script ends with `[RED] main: no function patch carries the registered builds' fixes to this build` or `[RED] main: function patches not applied` (Super Smash Bros. Ultimate 13.0.1: a static-initialiser abort in `nninitStartup`, GitHub issue #375).
 - **Cause:** fixed-address `CUTS` correctly apply only to their registered builds. Copying an old address, or matching a short instruction sequence, does not identify the updated function.
 - **Fix:** a profile can opt individual cuts into `MATCH_CUTS` in its `patches.py`. The shared matcher, `dm/tools/nso_match.py`, selects a unique complete unwind function by length and SHA-256 fingerprint. It retains constants, registers and internal branch destinations; normalizes relocation addresses; and checks the normalized bodies of direct callees or their imported symbol names. Original bytes are checked again before a cut is applied. Missing boundaries, unknown callees, changed code and ambiguous matches produce a red diagnostic and no cut. Every locator fails closed this way, and a new one must too: exactly one match with its assumptions checked, or no change (`dm_ue_cvar` in the host as well: a console variable whose name is registered twice is not written). That is what makes a looser binding safe on builds nobody has seen ([Binding](../agents/game-patches.md#binding)). Overlapping rules stop the rewrite. Every accepted cut is recorded in `<module>.cuts.tsv` with `[function match]` in its reason. Rules with the same `name` are one patch's reviewed implementations, for a function a build changed (another size, or the cut at another offset in it). Exactly one of them must match: the log names the implementation that did, and a red line appears only when none matches or more than one does. Before this, each implementation logged a red line on every build it did not match.
   - **A patch of several functions** (`{'name', 'functions': [{'size', 'fingerprints', 'cuts'}, ...]}`) applies whole or not at all: every function must match exactly once, at distinct places, or none of its cuts applies, and the red line names each function that did not match. Use it when the cuts depend on each other, as a constant used in several functions does (a region size, the place it derives, the bound checks of its end): applying some of them leaves code that disagrees about the layout, which fails later and less clearly than the original abort. Before this, rules were independent, so a constant split over several functions could not be enrolled safely.
@@ -18,8 +27,8 @@ The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/s
 
 To enroll a cut for any game's own module:
 
-1. Start from a verified fixed cut and its original NSO. Run `python3 dm/tools/nso_match.py <module.nso> <offset> <old hex> <new hex> <reason>` with the tools' Python environment. It emits a rule containing `name`, `size`, `fingerprints` and function-relative `cuts`, and rejects an ambiguous reference. Keep game files and scratch outputs in the game's NSP work folder.
-2. Check the function and callees in another known build using `nso_fnmap.py` and disassembly. Check that the cut still has the same effect. `Image.match(rule)` must resolve the reviewed location. If a reviewed implementation differs, generate its fingerprint separately; combine fingerprints only when function size and relative cuts agree, and otherwise add the implementation as another rule under the same name. Retain exact `CUTS` for known builds.
+1. Start from a verified fixed cut and its original NSO. Run `python3 dm/tools/nso_match.py <module.nso> <offset> <old hex> <new hex> <reason>` with the tools' Python environment. It emits a rule containing `name`, `size`, `fingerprints` and function-relative `cuts`, and rejects an ambiguous reference. For cuts that must apply together, `python3 dm/tools/nso_match.py <module.nso> --registered <name>` makes one patch of every cut registered for that NSO's build ID, grouped by function. Keep game files and scratch outputs in the game's NSP work folder.
+2. Check the function and callees in another known build using `nso_fnmap.py` and disassembly. Check that the cut still has the same effect. `Image.match_patch(rule)` must resolve the reviewed locations. If a reviewed implementation differs, generate its fingerprint separately; combine fingerprints only when function size and relative cuts agree, and otherwise add the implementation as another rule under the same name. Retain exact `CUTS` for known builds.
 3. Add the rule under `MATCH_CUTS = {'main': [rule]}` (or the appropriate non-SDK module) in that game's `patches.py`. Record the evidence and remaining runtime validation in the game's note. Do not transplant a workaround into unrelated games.
 4. Verify an unregistered build-ID copy through the rewriter, comparing its output with the known fixed cut, and run `test_nso_match.py`, `test_patches.py` and `test_nro_pack.py`. The matching tests use synthetic modules from two profiles to check relocation, rejection and isolation without game files.
 
@@ -59,8 +68,8 @@ To enroll a cut for any game's own module:
 
 - **Symptom:** `jump table <addr>` assertion where the index is a copy made before the check (`mov w0,w18`, then 41 instructions holding two other jump tables on `x0`, then `cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18`).
 - **Cause:** every other form follows copies made after the bounds check.
-- **Fix:** `check_before_copy` accepts the `cmp` and `b.hi` right before the load when a `mov wI, wS` up to 64 instructions back is the last writer of both registers; capstone lists a `cmp`'s first operand as written, which the search skips. It runs only when every other form has failed, so modules that rewrote before come out the same.
-- **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`.
+- **Fix:** `check_before_copy` accepts the `cmp` and `b.hi` right before the load when a `mov wI, wS` is the last writer of both registers; capstone lists a `cmp`'s first operand as written, which the search skips. The search follows the function boundary rather than an arbitrary instruction count, stopping at undecodable gaps and calls that can clobber either register. It runs only when every other form has failed.
+- **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`; [Mario + Rabbids Kingdom Battle](../../dm/games/010067300059A000/README.md) `subsdk0+0x7340b8`, whose copy is 71 instructions before the load, across two switches preserving both registers (beyond the former 64-instruction limit).
 - **Note:** before fixing one site, a census of all of them saves a run per site: a copy of `patch_nso.py` whose assert prints and continues found this one alone among the 25,508 `x18` sites. That `main` has no unwind entries for its first 70 MB, so the rewriter disassembles them as one function and takes 6 minutes (see [Long functions analysed in pieces](#long-functions-analysed-in-pieces)).
 
 ### 64-bit bounds check of the index
@@ -87,6 +96,14 @@ To enroll a cut for any game's own module:
 - **Found on:** FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition 1.0.0 (Unity 2018.4.2f1, SDK 8.2.1) `main+0x2d103cc` and `+0x2d10590`, in one function; the same form in its update 1.0.3.
 - **Check:** it runs only where the rewriter asserted before, so modules that rewrote before come out the same; other games' modules were not on hand to compare.
 
+### Zero-guarded complemented jump-table index
+
+- **Symptom:** `jump table 6eea88` or `jump table 6eeac0` assertion in `patch_nso.py` on Return of the Obra Dinn 1.0.1.
+- **Cause:** Unity's IL2CPP output uses `tst w15,#7; b.eq exit; mvn w15,w15; and x15,x15,#7; ldrsw x15,[xB,x15,lsl #2]; add x18,x15,xB; br x18`. The zero test excludes one masked value before complementing it: the reachable indices are 0–6, so the table holds seven entries. Treating the `tst` immediate as a `cmp` bound reads an eighth word from the next table, introducing a target the guest cannot reach through this dispatch.
+- **Fix:** the last fallback, `jump_masked_not`, accepts this contiguous guard / complement / low-bit-mask form, reads exactly the mask's number of entries, follows the table base through `copied_base`, and requires decoded instruction targets in the function. It rejects intervening register writes or control flow, direct branches / calls and already resolved tables entering after the guard, and its own table targets bypassing the guard. Earlier recognizers are unchanged.
+- **Found on:** [Return of the Obra Dinn](../../dm/games/010032E00E6E2000/README.md) 1.0.1 (`main` build `9e93a6566aaa27418dd2435d8d5dffe5`), two dispatches in the function at `main+0x6ee8c0`.
+- **Check:** `dm/tools/tests/test_jump_copies.py` exercises the exact seven-entry extent with an invalid next word, mismatched guards / masks / sources, register clobbers, incoming edges, undecodable words and invalid targets. The extracted update's two sites resolve to seven targets each; this is static verification, with gameplay validation recorded in the game note.
+
 ### Offset table base set far back in the function
 
 - **Symptom:** `jump table <addr>` assertion on an offset table whose base was set far back (`cmp w18,#5; b.hi; ldrsw x18,[x24,x18,lsl #2]; add x18,x18,x24; br x18`).
@@ -102,6 +119,14 @@ To enroll a cut for any game's own module:
 - **Fix:** the last attempt now follows register copies back to the `adrp` + `add` (`copied_base`, through no call while the register followed is caller-saved; the same target check). It runs only where the rewriter asserted before.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) 13.0.5 (SDK 8.2.1) `main+0x2b74458`: that `main`'s only unhandled site.
 - **Check:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md)'s three modules and Smash's `sdk` and movie module come out byte-identical.
+
+### Offset table base initialized after the dispatch
+
+- **Symptom:** `jump table ae95f8` assertion in `patch_nso.py` while rewriting Blasphemous 1.0.8.
+- **Cause:** the function enters an initialization block later in address order, then branches backward to `cmp w18,#9; b.hi; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18`. The `adrp x17` / `add x17,x17,#lo` pair is after the dispatch, so the backward writer searches find no base.
+- **Fix:** a final `jump_offsets` fallback uses `forward_table_base` only when that adjacent full-width pair is the base register's sole initialization in the function. It rejects other writes, calls that can clobber the base, known branches or table targets entering the add without its adrp, out-of-image tables and targets that are not decoded instructions of the function. Earlier recognizers are unchanged.
+- **Found on:** [Blasphemous](../../dm/games/0100698009C6E000/README.md), `main+0xae95f8`, ten table-relative targets.
+- **Check:** `dm/tools/tests/test_jump_copies.py` covers the exact table extent, base clobbers, incoming edges, undecodable targets and out-of-image tables. The extracted function resolves to the ten targets read directly from its table.
 
 ### Offset tables relative to an adr
 
@@ -312,6 +337,14 @@ To enroll a cut for any game's own module:
 - **Fix:** `dm/tools/nso_code.py` finds such data blocks: a stretch of at least 4 KB between the `.eh_frame` FDE ranges in which more than a quarter of the words do not decode. The sweep skips them (`DATA_BLOCKS`, logged as `data blocks left alone`), and so does `insn_census.py`, whose counts then match the rewriter's again (11,744 `x18` sites in Absolum's `main`). Code without unwind information is still swept: it decodes (Absolum's zlib at `main+0x75261c`, libunwind's register restore at `main+0x28dbd4`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) `main` (.NET NativeAOT).
 - **Check:** no module of the 19 other games on hand has a data block, and their rewrites are byte-identical.
+
+### NRO metadata inside the text segment
+
+- **Symptom:** `RuntimeError: 44 ldr x18, #0xfffffffffff40370` while rewriting an NRO.
+- **Cause:** an NRO's text segment includes its metadata header. The arbitrary build ID at `+0x40` can decode as instructions; `magic_0898_2015.nro` contains a literal load into `x18` at `+0x44`. The ordinary 4 KB data-gap heuristic cannot exclude this 120-byte header.
+- **Fix:** `nso_code.data_blocks` explicitly excludes `+8..+0x80` when the image has the `NRO0` header. The initial entry branch and MOD0 pointer remain intact, and scanning resumes at the first possible function. NSO scanning is unchanged.
+- **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), 1,432 registered NROs.
+- **Check:** `test_nro_header.py` runs the real rewriter on synthetic NROs whose build IDs decode as an `x18` load or `br x18`, checks the header byte-for-byte, and checks that an actual `x18` instruction immediately after it is rewritten. Code before the first unwind entry is covered too: per-function analysis must not reenter the header even when the linear scans exclude it.
 
 ## Stack and system registers
 

@@ -1,6 +1,7 @@
 """NSP script reuse across derived and provisional builds. Real fingerprints and mock tool runs; no game files, keys or Xcode needed."""
 import collections
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -390,6 +391,64 @@ class DlcOnlyShaders(Base):
                 tables.joinpath('shader_map.tsv').write_text(shader_map)
                 tables.joinpath('shader_facts.tsv').write_text(facts)
                 self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
+
+
+class ComputeReaderAdditions(Base):
+    V, P, C = 'a' * 16, 'b' * 16, 'c' * 16
+    SOURCE = '/payload#Skinning#run.0'
+
+    def setUp(self):
+        super().setUp()
+        self.tables = self.tmp / 'new-tables'; self.tables.mkdir()
+        self.old = {'shader_map.tsv': f'vs_data.bin\t0\tvertex\t{self.V}\t/original-vs\nps_data.bin\t0\tpixel\t{self.P}\t/original-ps\n',
+                    'shader_facts.tsv': f'{self.V}\t{{"manual":1}}\n', 'shader_pairs.tsv': f'{self.V}\t{self.P}\n',
+                    'pso_pairs.tsv': '# no supplemental pairs\n'}
+        self.new = dict(self.old)
+        self.new['shader_map.tsv'] += f'cs_data.bin\t0\tcompute\t{self.C}\t{self.SOURCE}\n'
+        self.new['shader_facts.tsv'] += f'{self.C}\t{{"local":[8,1,1],"shared":0}}\n'
+        self.log = 'unity compute source: ' + json.dumps([self.C, self.SOURCE]) + '\n'
+        for n, text in self.old.items(): (self.src / n).write_text(text)
+
+    def check(self, tables=None, log=None):
+        for n, text in (self.new if tables is None else tables).items(): (self.tables / n).write_text(text)
+        return nsp.compute_reader_additions(game.Game(self.src), self.tables, self.log if log is None else log)
+
+    def test_only_new_reader_proven_compute_kernels_qualify(self):
+        self.assertTrue(self.check())
+        changed = dict(self.new, **{'shader_map.tsv': self.new['shader_map.tsv'].replace('\t0\tvertex', '\t9\tvertex')})
+        self.assertTrue(self.check(changed))  # Existing package indices may move; their identities cannot.
+        changed['pso_pairs.tsv'] = f'{self.V}\t{self.P}\n'
+        self.assertTrue(self.check(changed))  # Supplemental pass covers may be added beside the compute reader.
+        for what, tables, log in (
+            ('no additions', self.old, self.log),
+            ('no reader evidence', self.new, ''),
+            ('different source evidence', self.new, self.log.replace(self.SOURCE, '/other')),
+            ('malformed evidence', self.new, 'unity compute source: broken\n'),
+            ('wrong evidence type', self.new, 'unity compute source: {"key":"source"}\n'),
+            ('graphics addition', dict(self.new, **{'shader_map.tsv': self.new['shader_map.tsv'].replace('\tcompute\t', '\tvertex\t')}), self.log),
+            ('missing new facts', dict(self.new, **{'shader_facts.tsv': self.old['shader_facts.tsv']}), self.log),
+            ('extra facts', dict(self.new, **{'shader_facts.tsv': self.new['shader_facts.tsv'] + 'other\t{}\n'}), self.log),
+        ):
+            with self.subTest(what=what): self.assertFalse(self.check(tables, log))
+
+    def test_original_shaders_facts_and_pairs_cannot_change(self):
+        for what, name, text in (
+            ('removed shader', 'shader_map.tsv', self.new['shader_map.tsv'].split('\n', 1)[1]),
+            ('changed key', 'shader_map.tsv', self.new['shader_map.tsv'].replace(self.V, 'd' * 16)),
+            ('changed source', 'shader_map.tsv', self.new['shader_map.tsv'].replace('/original-vs', '/other')),
+            ('changed package', 'shader_map.tsv', self.new['shader_map.tsv'].replace('vs_data.bin', 'vs_other.bin')),
+            ('changed stage', 'shader_map.tsv', self.new['shader_map.tsv'].replace('\tvertex\t', '\tpixel\t')),
+            ('duplicate key', 'shader_map.tsv', self.new['shader_map.tsv'] + self.old['shader_map.tsv']),
+            ('changed fact', 'shader_facts.tsv', self.new['shader_facts.tsv'].replace('"manual":1', '"manual":2')),
+            ('removed fact', 'shader_facts.tsv', self.new['shader_facts.tsv'].split('\n', 1)[1]),
+            ('removed evidence pair', 'shader_pairs.tsv', '# none\n'),
+            ('changed evidence pair', 'shader_pairs.tsv', f'{self.P}\t{self.V}\n'),
+            ('compute in supplemental pair', 'pso_pairs.tsv', f'{self.V}\t{self.C}\n'),
+        ):
+            with self.subTest(what=what): self.assertFalse(self.check(dict(self.new, **{name: text})))
+        (self.src / 'pso_pairs.tsv').write_text(f'{self.V}\t{self.P}\n')
+        self.assertFalse(self.check())
+        self.assertTrue(self.check(dict(self.new, **{'pso_pairs.tsv': f'{self.V}\t{self.P}\n'})))
 
 
 class SplitShaders(Base):

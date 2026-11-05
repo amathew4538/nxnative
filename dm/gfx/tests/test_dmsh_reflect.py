@@ -7,6 +7,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
+import dmsh_abi
 import dmsh_geometry
 
 
@@ -15,8 +16,9 @@ def builder_reflection():
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
     names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
-                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))]
-    ns = {'re': re, 'dmsh_geometry': dmsh_geometry}
+                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
+                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
+    ns = {'re': re, 'dmsh_geometry': dmsh_geometry, 'abi': dmsh_abi}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
     return ns['reflect']
 

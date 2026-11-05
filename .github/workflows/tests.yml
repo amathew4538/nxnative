@@ -33,7 +33,7 @@ defaults:
 jobs:
   host-tests:
     name: Host unit tests and CPU-only gfx tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -165,7 +165,7 @@ jobs:
 
   tool-tests:
     name: Tool tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -179,7 +179,7 @@ jobs:
           cache: pip
           cache-dependency-path: .github/workflows/tests.yml   # no requirements file: the packages are listed in the step below
       - name: Install the Python packages the tools import
-        run: python -m pip install lz4 capstone fonttools   # backports.zstd is for Python before 3.14 only
+        run: python -m pip install lz4 "capstone>=5,<6" fonttools   # backports.zstd is for Python before 3.14 only
       # The shader translator's tests (test_image_atomic_bounds, test_dmsh_geometry) run the committed translator on synthetic Maxwell shaders, then spirv-val and the committed spirv-cross:
       # one translation chain serves every game, so these are what checks a translator change on games its author does not own (GitHub issue #272). Compiling their MSL with
       # Metal (DMSH_TEST_METAL=1) and running it on the GPU (DMSH_TEST_GPU=1) stay local.
@@ -212,7 +212,7 @@ jobs:
 
   build:
     name: Build check (Mac host, gfx tests, iOS sources)
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -253,7 +253,7 @@ jobs:
 
   ios-build:
     name: Unsigned iOS app (synthetic modules, Swift and link)
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

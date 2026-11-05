@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_geometry
+import dmsh_geometry, dmsh_mesh
 
 RASTER_CHECK = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>

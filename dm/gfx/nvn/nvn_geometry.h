@@ -3,6 +3,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 static int nvn_geo_topology(int prim) {
     switch (prim) {
@@ -21,6 +22,12 @@ static int nvn_geo_width(int topology) { static const int width[] = {1, 2, 4, 3,
 static size_t nvn_geo_assemble(int prim, const uint32_t *src, size_t count, int restart, uint32_t restart_index, uint32_t *dst, size_t capacity) {
     int width = nvn_geo_width(nvn_geo_topology(prim));
     if (!width) return SIZE_MAX;
+    if (!restart && (prim == 0 || prim == 1 || prim == 4 || prim == 10 || prim == 12)) {   // lists: the map is the indices up to the last whole primitive
+        size_t words = count / (size_t)width * (size_t)width;
+        if (dst && words > capacity) return SIZE_MAX;
+        if (dst) memcpy(dst, src, words * sizeof *src);
+        return words;
+    }
     if (dst) {
         size_t needed = nvn_geo_assemble(prim, src, count, restart, restart_index, NULL, 0);
         if (needed == SIZE_MAX || needed > capacity) return SIZE_MAX;
@@ -70,9 +77,11 @@ static size_t nvn_geo_assemble(int prim, const uint32_t *src, size_t count, int 
 // One ordered compaction per draw. Output is a point/line/triangle list, so it
 // does not depend on Metal primitive-restart behaviour. Preserve triangle-strip
 // winding and the last vertex. Unwritten GS index slots are UINT_MAX.
-// Three dispatches, in order: geo_pack_count (a thread per invocation group counts the indices it
-// emits), geo_pack_scan (one workgroup scans contiguous chunks into ordered offsets and writes the indirect arguments)
-// and geo_pack_write (a thread per group writes its indices at its offset). A single thread used to
+// Large draws use three dispatches: geo_pack_count scans 64-group blocks,
+// geo_pack_scan scans their totals in parallel and writes indirect arguments,
+// then geo_pack_write adds local and block offsets. A draw of up to 1024 groups
+// instead runs geo_pack_small, doing the ordered compaction in one workgroup.
+// A single thread used to
 // walk every group: with it, each frame that drew OCTOPATH TRAVELER II's 129,032-triangle cube shadow mesh
 // (drawn in runs, nvn_geometry.inc geo_split) took about 300 ms; now only the first one is long.
 // The kernels: dm/gfx/msl/geo_pack.metal (host_msl_lib "geo_pack")

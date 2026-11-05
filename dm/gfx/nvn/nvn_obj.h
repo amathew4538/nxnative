@@ -6,6 +6,7 @@
 #include <string.h>
 #include "nvn.h"
 #include "nvn_tex.h"
+#include "dmsh_abi.h"   // the shader library ABI shared with the shader build (DMSH_SEPTEX_SLOT0)
 
 #define MAGIC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 #define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " exceeds the reserved size of " #H)
@@ -15,7 +16,7 @@ typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_d
 
 typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
-typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; } queue_t;  FITS(queue_t, NVNqueue);
+typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; } queue_t;  FITS(queue_t, NVNqueue);
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
@@ -116,6 +117,7 @@ typedef struct {
 } p_multi_draw;
 typedef struct { int32_t n; const tex_t *color[8]; view_t cview[8]; uint8_t has_cview[8]; const tex_t *depth; view_t dview; uint8_t has_dview; } p_set_rt;
 typedef struct { int32_t index, mask; float rgba[4]; } p_clear_color;
+typedef struct { uint64_t h; NVNdrawTextureRegion d, s; } p_draw_tex;   // nvnCommandBufferDrawTexture: texture handle, destination (pixels) and source (texels) regions
 typedef struct { int32_t mode, pad; uint64_t addr; } p_render_cond;   // mode 0 / 1: SetRenderEnableConditional (render if the 64-bit counters at addr and addr + 16 are equal / not equal), 2 / 3: SetRenderEnable(true / false)
 typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_clear_ds;
 typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x, y, w, h, near, far (near and far are overridden by DEPTH_RANGE)
@@ -129,7 +131,7 @@ typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
 // 24 for blend, multisample and depth-stencil, instead of 40 for all. Readers take that kind's size from bytes. Games size display-list heaps by GetCommandMemoryUsed: Super Mario Odyssey's
 // "DisplayList" GPU heap (62 MB, a bump allocator, main+0x5e8280) filled while a kingdom loaded with 40-byte state binds (39% of its bytes), and every display list after that got no memory
 typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;
-typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
+typedef struct { int32_t first, n; uint32_t st[32]; } p_bind_vattr;
 typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
 typedef struct { int32_t first, n; NVNbufferRange r[16]; } p_bind_vbuf;
 // Games measure scratch recordings to size resource heaps. Keep a single bounded binding at 24 bytes including its header (the native vertex-buffer command is 24 bytes).
@@ -165,9 +167,9 @@ static inline const p_bind_handles *bind_rec(uint32_t op, const void *a, p_bind_
     t->stage = b->stage & ~BIND_TEX1_NOBASE; t->first = b->slot; t->n = 1; t->defer = 0; t->src = 0;
     t->h[0] = (tid ? tid + (uint64_t)tb : 0) | (sid ? sid + (uint64_t)sb : 0) << 20; return t;
 }
-// Texture slots of a stage: 0-127 nvnCommandBufferBindTexture's (combined handles), 128-255 the separate texture binds. The driver keeps the two in tables of their own (c2 0x20 + 8 r and
-// 0x168 + 8 r, dm/gfx/tools/dmsh_build.py), which the shaders' reflection names as these slots, so a game may bind both kinds in the same frame (Monster Hunter Rise: BindTexture slot 0 beside separate slots 0-4)
-#define NVN_SEPTEX_SLOT0 128
+// Texture slots of a stage: 0-127 nvnCommandBufferBindTexture's (combined handles), 128-255 the separate texture binds. The driver keeps the two in tables of their own (c2 DMSH_C2_TEX + 8 r and
+// DMSH_C2_SEPTEX + 8 r, dmsh_abi.h), which the shaders' reflection names as these slots, so a game may bind both kinds in the same frame (Monster Hunter Rise: BindTexture slot 0 beside separate slots 0-4)
+#define NVN_SEPTEX_SLOT0 DMSH_SEPTEX_SLOT0
 typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil;  // which: 0 value mask 1 write mask 2 reference value
 typedef struct { float factor, units, clamp; } p_poly_offset;
 enum { DM_PRIM_MESH_TASKS = 0x40 };   // p_draw.prim of nvnCommandBufferDrawMeshTasks (first task or mesh workgroup, count): no NVN primitive has this value
@@ -251,6 +253,7 @@ void mtl_create_stats(uint64_t *lib, uint64_t *pso);   // Cumulative: number of 
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
 // Descriptor pool registration (texture ID / sampler ID → object snapshot), program release
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v);
+void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool finalized (dm/gfx/tests/nvn_replay.m: a captured registry entry, as the live run left it)
 void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage declares image use even when the builder omitted IMAGE
 // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
@@ -269,3 +272,5 @@ void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libra
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
+// Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
+void nvn_serial_floor(uint64_t s);

@@ -4,7 +4,7 @@ void front_save_failed(int err) { g_nfail++; g_lasterr = err; }
 
 // the loader's module table (dm.h): the unit test has no modules, so the table is empty
 #include "../dm.h"
-module_t g_mod[MAX_MOD];
+module_t *g_mod;
 int g_nmod;
 // the loader's symbol lookup (loader.c): no modules, so no SDK, unless a test sets its own lookup
 void *(*t_guest_sym)(const char *);

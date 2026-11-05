@@ -278,8 +278,16 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** `FATAL submit re-entered` in the first frames.
 - **Cause:** the game initializes two NVN queues and submits on both from two threads, while the Metal replay keeps one command buffer for the submission in progress.
-- **Fix:** `nvnQueueSubmitCommands` now holds a lock across the replay (`g_sub_mu` in `hle_nvn.c`).
+- **Fix:** `nvnQueueSubmitCommands` now holds a lock across the replay (`g_sub_mu` in `hle_nvn.c`). It takes the lock before the graphics gate ([Going to the background during the prepare step](#going-to-the-background-during-the-prepare-step)).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md).
+
+### Going to the background during the prepare step
+
+- **Symptom:** going to the background (iOS `sceneDidEnterBackground`, minimizing the Mac window) while the "Preparing shaders" or "Preparing pipelines" screen is up blocks the main thread until the step ends: minutes on a first start, long enough for iOS to end the app. The log's `[nvn] graphics suspended` line comes only after the `pipeline prepare:` line.
+- **Cause:** the prepare step (the prewarm and the pipeline prebuild, `mtl_prepare` in `nvn_mtl.m`) runs in the game's first `nvnQueueSubmitCommands`, which held the graphics gate across it. `dm_gfx_suspend(1)` closes the gate and waits for every submit and present inside it to leave. The step loads shaders and builds pipelines and submits no GPU work, so it never needed the gate.
+- **Fix:** the submit entry runs the prepare step under the submit lock (`g_sub_mu`) but before it enters the gate, marked as host work for the guest scheduler (`dm_host_work`). If the app went to the background meanwhile, the submission waits at the gate for the foreground like any other. The lock now comes before the gate, taken with `dm_host_mutex_lock`: with the gate first, a second submission waiting for the lock counted as in flight, so the suspend waited for it while the first, done preparing, waited at the closed gate holding the lock. `mtl_sub_begin` still calls `mtl_prepare`, a no-op by then, for the replay tool (`nvn_replay`), which has no gate.
+- **Check:** the CPU-only `t_gfx_suspend` runs the real submit entry on two threads with a prepare step held by semaphores. It checks that the step runs outside the gate as host work, that the queued second submission is not in flight, that the suspend returns while the step holds the lock, that nothing commits in the background, and that both submissions finish after resume. With the gate taken before the lock it fails before suspending.
+- **Found on:** no game named in the source (general: every NVN game with a prewarm list; a first start without the Metal cache takes longest). **Open:** not yet run by going to the background during a real game's prepare step on an iPhone.
 
 ### A GPU command buffer that never completes
 
@@ -331,8 +339,16 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** driver comparisons report the wrong block dimensions for packaged 2D / 3D textures, or too little storage for linear block-compressed textures (64x64 BC1 with stride 128: 2048 bytes instead of 8192).
 - **Cause:** `SetPackagedTextureLayout` byte 0 holds log2 block height in its low nibble and log2 block depth in its high nibble. The host treated the whole byte as a 2D block height and ignored it for 3D. Linear storage was sized by compressed block rows, while NVN counts pixel rows.
 - **Fix:** `nvn_tex_layout` decodes both nibbles for 3D and only the height nibble for 2D; a present byte of zero overrides automatic dimensions too (`pkg_block_h` stores byte 0 + 1). Level offsets and CPU / GPU deswizzling use those shared dimensions, reduced for smaller mips. Both linear flags use stride times pixel height, preserving row alignment and explicit strides.
-- **Check:** `t_tex_layout` covers nine driver-derived shapes; four fail before the fix. `t_tex` also decodes packaged 3D markers at independently calculated addresses and checks mip dimensions and offsets; `t_deswz_gpu` checks both packaged 3D layouts across six mips on Metal. `MINIMAL_LAYOUT` (0x200) remains unimplemented; linear compressed-texture uploads are outside these storage checks.
+- **Check:** `t_tex_layout` covers nine driver-derived shapes; four fail before the fix. `t_tex` also decodes packaged 3D markers at independently calculated addresses and checks mip dimensions and offsets; `t_deswz_gpu` checks both packaged 3D layouts across six mips on Metal. For flag 0x200 see [Minimal texture layouts](#minimal-texture-layouts); linear compressed-texture uploads are outside these storage checks.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): digitalhivehub's driver probes in [PR #11](https://github.com/seedds/nxnative/pull/11), ported through MacNativeGames `3c482a7` and [PR #201](https://github.com/seedds/nxnative/pull/201). Validated here with CPU and synthetic Mac GPU tests; packaged 3D / linear BC gameplay and the iPhone have not been rechecked.
+
+### Minimal texture layouts
+
+- **Symptom:** huge stretched terrain walls and ceilings, flickering, while characters and the HUD are right: `WriteTexels` into a texture overwrote the mesh data stored right after it.
+- **Cause:** `nvn_tex_layout` ignored `MINIMAL_LAYOUT` (0x200) and laid every such texture out with the automatic block height. The driver keeps the automatic block height and depth only when the whole layer (every level and the layer alignment) is no larger than with 1-GOB blocks; otherwise it takes 1-GOB blocks. A game that packs resources by the driver's sizes then gets textures larger than their slots.
+- **Fix:** `nvn_tex_layout` compares the two layer sizes (`layer_bytes`) and takes 1-GOB blocks when they differ, so storage size, level offsets and CPU / GPU swizzling agree. A packaged layout and a sparse texture's tiles keep their own blocks. This is the rule digitalhivehub measured on the game's own driver in [PR #11](https://github.com/seedds/nxnative/pull/11) (a sweep with no difference left outside `SPARSE`), which the port of that PR left out.
+- **Check:** `t_tex_layout` has PR #11's six driver shapes with the flag (320×320 RGB565, 260×260 RG8 with 9 levels, 8×1920 R8 with 11, 3D 64×64×8 and ×9, 64×128 RGBA8 that keeps its block) and three from issue #183 (RGB5A1 320×320, a 2D array with mips, a packaged layout over the flag): 23 of 23 match, 17 before. `t_nvn` writes two adjacent 320×320 textures with `WriteTexels` and checks the bytes after each and the texels read back; `t_deswz_gpu` deswizzles the Depths shape and the array on Metal (19 cases pass).
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#rendering) (GitHub issue #183, the Depths): two 320×320 RGB5A1 / RGB565 textures before mesh data in one resource take 204,800 bytes each; the host laid them out in 245,760. Found by the issue's reporters (M1 with 1.2.1, replaying the wrong writes reproduced every changed byte of the resource; checked on M4 with 1.4.3).
 
 ### Linear textures in CPU-visible pools
 
@@ -456,6 +472,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (Mac and iPhone): the stone blocks and steps of the opening cave got no torch light (on the Switch they are grey stone lit warm on the side facing the torch; here they kept their texture and the ambient light but stayed black). Their fragment shader `54e8c08998050e79` takes its roughness from a 5120×5120 BC4 atlas (roughness = the square root of its red, packed into the upper six bits of blue in colour target 3, which the tile-light shaders read); the atlas was all zero, and roughness 0 gives no point light. TOTK fills 1024×1024 BC4 material textures from the CPU with no NVN flush, reads them back with `nvnTextureReadTexels` on its own threads before any draw uses them, and copies the blocks into the atlas, which itself is filled after it was first bound.
 - **Note:** found by running MacNativeGames' build of the same game on the same save: their atlas held data and their blocks were lit (their `ReadTexels` reads guest memory). Traced with `DM_NVN_TEXDUMP` (the blocks' roughness bits in colour target 3), the shader's MSL, `DM_NVN_TEXRAW` on the atlas and `DM_NVN_TEXINFO` (guest bytes), then lldb reading the atlas memory inside their process. Fast loop: the in-cave autosave (`run/save`, keys `f2500:A,f2800:A,f3100:A,f3600:A`, shot at frame 4500); `DM_DETCLOCK` cannot be used (TOTK stops at frame 1 waiting for guest time).
 
+### `ReadTexels` on a texture of a sparse pool
+
+- **Symptom:** `[RED] upload batches belong to the submit thread only: up_begin called on thread '…'`, then an abort, with `pkg_upload` ← `tex_mtl` ← `mtl_read_texels` on the stack; or `CRASH sig=10` in `nvn_deswizzle` ← `mtl_read_texels`, at an address in a sparse virtual pool's reserved range.
+- **Cause:** `mtl_read_texels` read a texture from its storage only when it had a packaged layout or was CPU-written, while `tex_mtl_` also takes a sampled texture of a [sparse virtual pool](#sampled-textures-in-a-sparse-pool-uploaded-through-the-page-table) from its storage. Such a texture went through `tex_mtl`, which uploaded it (first use, or pages written or mapped since) on the game's thread, where the upload batch must not be used. And a texture of a sparse pool that did take the storage path was read at its virtual address directly, not through the page table: unmapped pages, and pages mapped at offsets the host cannot alias, are inaccessible there.
+- **Fix:** one predicate, `tex_from_storage`, decides for both `tex_mtl_` and `mtl_read_texels` which textures the host takes from their storage, and `mtl_read_texels` reads a sparse pool's texture through a copy gathered from its page table (`nvn_sparse_copy`, unmapped pages as 0), as `pkg_upload_` uploads it. Neither touches the host texture, so the read works on any thread. The `up_owner_check` abort stays: a texture upload on another thread is still a bug to find.
+- **Check:** `t_readback` reads a sparse texture over mapped and over unmapped pages, first on another thread and then on the submit thread. Before the fix, a profile without `tex_dirty_upload` aborted in `up_begin`, and TOTK's profile crashed with SIGBUS on the unmapped texture.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) on an iPad Pro (M5), GitHub issue #471: an abort a few seconds after the app came back from the background (switching between Stage Manager and full screen triggers it), on thread `bake::ModuleMgr`. The reporter traced it to `mtl_read_texels`.
+
 ### GPU copies into textures uploaded from their storage
 
 - **Symptom:** a streamed texture's small mip levels hold another texture or zeros while its large levels are right (`texraw <serial>.<level>`), so surfaces sampled with a mip bias or at a distance show bright speckles, dark blotches and sharp detail where the Switch shows soft texture (Yoshi's felt), from the moment finer levels stream in (the opening going dark).
@@ -537,6 +561,21 @@ Games read this count as a position in their own command memory and size their h
 
 ## NVN entry points
 
+### Integer sampler border colours
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderSetBorderColorui` during renderer initialization.
+- **Cause:** only the floating-point setter was implemented.
+- **Fix:** implement signed and unsigned integer setters with numeric conversion into the sampler's border-colour state. Metal's existing selection among transparent black, opaque black and opaque white then sees integer zero and one correctly; bit-casting integer one to float would select the wrong colour.
+- **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), launcher and both games.
+- **Check:** `t_nvn` invokes both setters through the real entry-point lookup and checks initialized sampler state.
+
+### Bound handles are the driver's 32-bit words
+
+- **Symptom:** `[RED] sampler ID 4096 not registered` (or another ID past the sampler pool), once, from the first frames on.
+- **Cause:** NVN's texture, separate texture and sampler handles are 64-bit, but the driver writes each bound one into the c2 handle table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half. The host kept the whole 64 bits of the handles of `nvnCommandBufferBindTextures`, `BindSeparateTextures`, `BindSeparateSamplers` and `BindImages`, and took the sampler ID as the handle shifted right by 20. EA SPORTS FC 27 binds separate textures with bit 32 set (`0x1000001d1`, texture 0x1d1): a shader that takes its sampler from that combined word got ID 4096, where the GPU reads sampler 0. The single `nvnCommandBufferBindTexture` record already read its handle as 32 bits.
+- **Fix:** `bind_handles` (`hle_nvn.c`) keeps the low 32 bits of each handle before it moves the IDs to the part of the host's table of the pool the command buffer bound (which may then pass 12 bits).
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), at the title and in the menus.
+
 ### Version and capability checks that fail quietly
 
 - **Symptom:** device / subsystem setup returns quietly and the next stage never starts.
@@ -598,6 +637,20 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** an abort in device setup when `nvnTexturePoolGetSize` / `nvnSamplerPoolGetSize` returned 0.
 - **Fix:** implemented: `nvnTexturePoolGetSize` / `nvnSamplerPoolGetSize` and their memory pool / offset getters; `nvnCommandBufferFenceSync`, which Unreal's RHI records in its command buffers ([Fence syncs recorded in command buffers](#fence-syncs-recorded-in-command-buffers)); `nvnTextureGetTextureAddress` (pool address + offset, as `nvnMemoryPoolGetBufferAddress`); `nvnCommandBufferGetCommandMemorySize` (used + free, as in NVN; `GetCommandMemoryFree` is what is left in the current segment).
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (the pool getters and `nvnCommandBufferFenceSync`, new with Unreal); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (Unreal Engine 4.18: `nvnTextureGetTextureAddress`, `nvnCommandBufferGetCommandMemorySize`).
+
+### Builder storage getters
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnTextureBuilderGetMemoryOffset`, then `nvnTextureBuilderGetRawStorageClass`.
+- **Cause:** the renderer reads a texture builder's storage back before it initializes the texture; the host had the texture's getters (`nvnTextureGetMemoryPool` / `Offset` / `RawStorageClass`) but not the builders'.
+- **Fix:** the texture, buffer and event builders return the pool and offset `SetStorage` stored (the pool getters return its address, as `nvnTextureGetMemoryPool` does; the header the prototypes come from declares the builders' by value, so they are `NVN_NOPROTO`), and the texture builder's raw storage class is the texture's (1): it only names the page kind a virtual pool maps (`NVNmappingRequest.storageClass`), which the host's virtual pools do not distinguish.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (SDK 22, Frostbite's NVN renderer NRO).
+
+### `Map` of a pool without CPU access returns NULL
+
+- **Symptom:** `[nvn-mtl] FATAL buffer copy address is in no memory pool src=0x70d08a8b00 dst=0 n=0x29a00` as a match loads: a recorded `CopyBufferToBuffer` whose destination is 0.
+- **Cause:** NVN maps a buffer or pool created with `NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS` to NULL, and the game depends on it: Frostbite's renderer (`OpcodeCopySubresource` in `Engine.Render.Core2.PlatformNvn.nro`) takes a buffer's GPU address as `nvnBufferGetAddress + (its data pointer − nvnBufferMap)`, with a null data pointer for a GPU-only buffer. The host's storage is CPU memory, and its `Map` returned the same pointer `GetAddress` does, so the sum came to 0 (traced to a `BufferMap` of a pool with flags `0x21`, CPU_NO_ACCESS | GPU_CACHED, right before the copy).
+- **Fix:** `nvnBufferMap` and `nvnMemoryPoolMap` return NULL when the pool has no CPU access, as in NVN (`hle_nvn.c`). The host's own accesses to the storage go through the pool, not through `Map`.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (SDK 22): the first match load.
 
 ### NVN calls that were red stubs
 

@@ -37,7 +37,7 @@ class ShaderCache(unittest.TestCase):
         root = Path(self.tmp.name)
         self.ns: dict[str, Any] = dict(hashlib=hashlib, os=os, json=json, re=re, threading=threading,
                        subprocess=subprocess, dmsh_chain=dmsh_chain, SPIRV_CROSS='converter',
-                       XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None,
+                       XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
                        DUAL_WANT=set(), BF_WANT=set(), BF_STATS=collections.Counter(), CAS=str(root / 'cas'), out=str(root / 'out'),
@@ -61,6 +61,7 @@ class ShaderCache(unittest.TestCase):
             with self.subTest(ios=ios):
                 ios_dir = Path(self.tmp.name) / 'ios'
                 self.ns['IOSOUT'] = str(ios_dir) if ios else None
+                self.ns['TARGETS'] = {'mac', 'ios'} if ios else {'mac'}
                 if ios: ios_dir.mkdir(exist_ok=True)
                 self.ns['METAL_FP'] = 'override Metal and SDK'
                 old = self.digest()
@@ -68,6 +69,8 @@ class ShaderCache(unittest.TestCase):
                     d = Path(self.ns['cache_path'](old)) / target; d.mkdir(parents=True, exist_ok=True)
                     (d / 'key_b.metallib').write_bytes(b'untested compiled library')
                     (d / 'key_b.json').write_text('{}')
+                    if target == 'mac': (d / 'key_b.metal').write_text('MSL')
+                self.assertTrue(self.ns['restore_cache']('key', old))
                 self.ns['METAL_FP'] = 'tested Metal and SDK'
                 self.assertFalse(self.ns['restore_cache']('key', self.digest()))
 
@@ -331,8 +334,9 @@ class MetalPrefill(unittest.TestCase):
 
     def earlier_libraries(self, third_identity):
         for i in range(3):
-            stem = f'key{i}_b'; src = f'MSL {i}'.encode()
+            stem = f'{i:016x}_b'; src = f'MSL {i}'.encode()
             (self.old / (stem + '.metal')).write_bytes(src)
+            (self.old / ('._' + stem + '.metal')).write_bytes(b'\0\x05\x16\x07' + b'\xa0' * 4092)   # an exFAT drive's AppleDouble: no shader of its own
             (self.old / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'WRONG OVERRIDE LIBRARY')
             meta = {'chain_metal': 'flags', 'stage': 'ps', 'chain_compiler': self.cache.ident['mac'].hex()}
             if i == 2:
@@ -347,14 +351,21 @@ class MetalPrefill(unittest.TestCase):
                 self.earlier_libraries(identity)
                 self.cache.fill(str(self.old))
                 result = self.root / 'result.metallib'
-                self.cache.compile('mac', str(self.old / 'key2_b.metal'), str(result))
+                self.cache.compile('mac', str(self.old / f'{2:016x}_b.metal'), str(result))
                 self.assertEqual(result.read_bytes(), b'TESTED MSL 2')
 
     def test_matching_compiler_libraries_still_prefill(self):
         self.earlier_libraries(self.cache.ident['mac'].hex())
-        (self.old / 'key2_b.metallib').write_bytes(b'TESTED MSL 2')
+        (self.old / f'{2:016x}_b.metallib').write_bytes(b'TESTED MSL 2')
         self.cache.fill(str(self.old))
         self.assertEqual(self.cache.stats['mac', 'filled'], 3)
+
+    def test_unrequested_target_is_not_sample_compiled(self):
+        self.earlier_libraries(self.cache.ident['mac'].hex())
+        with mock.patch.object(self.cache, '_compile') as compile_sample:
+            self.cache.fill(str(self.old), targets={'ios'})
+        compile_sample.assert_not_called()
+        self.assertEqual(self.cache.stats['mac', 'filled'], 0)
 
     def test_legacy_cache_entries_cannot_restore_misclassified_libraries(self):
         src = b'MSL'; msl = self.root / 'shader.metal'; msl.write_bytes(src)
