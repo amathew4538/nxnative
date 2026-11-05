@@ -86,6 +86,18 @@ class CheckTools(unittest.TestCase):
                 self.assertEqual(self.check([missing])[0], want)
         with mock.patch.dict(os.environ, {'DMSH_TARGETS': 'mac'}): self.assertEqual(self.check([mismatch('metal_macosx', 'missing')])[0], [mismatch('metal_macosx', 'missing')])
 
+    def test_jit_mac_ignores_mac_compiler(self):
+        missing = mismatch('metal_macosx', 'missing')
+        other = mismatch('metal_macosx', OTHER)
+        with mock.patch.dict(os.environ, {'DMSH_TARGETS': 'mac', 'DM_METAL_SHADER_MODE': 'jit'}):
+            for failure in (missing, other):
+                with self.subTest(failure=failure):
+                    self.assertEqual(self.check([failure])[0], [])
+
+    def test_jit_with_ios_keeps_mac_compiler_check(self):
+        with mock.patch.dict(os.environ, {'DMSH_TARGETS': 'mac,ios', 'DM_METAL_SHADER_MODE': 'jit'}):
+            self.assertEqual(self.check([mismatch('metal_macosx', 'missing')])[0], [mismatch('metal_macosx', 'missing')])
+
     def test_check_metal(self):   # --check-metal, as the NSP script runs it: the message when it would stop, '' otherwise
         for actual, allow, stops in ((LOCKED['metal_macosx'], False, False), (OTHER, False, True), (OTHER, True, False), ('missing', False, False)):
             env = {k: v for k, v in os.environ.items() if k != own_compilers.ALLOW}
