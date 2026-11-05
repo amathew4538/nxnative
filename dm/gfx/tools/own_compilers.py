@@ -55,11 +55,15 @@ def check_metal():   # --check-metal: the stop message, '' when the build may go
 def ios_target():   # as dmsh_build.py picks its targets: a Mac-only build (the NSP script's --platform mac / mac-app) compiles nothing for iOS
     return 'ios' in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if os.environ.get('IOSOUT') else 'mac')).split(',')
 
+def jit_mac():   # Mac JIT keeps MSL source for the host, so its offline macOS Metal compiler is not an input
+    return os.environ.get('DM_METAL_SHADER_MODE') == 'jit' and not ios_target()
+
 def check_tools():
     bad, own = [], []
     for b in strict():
         m = OWN.fullmatch(b)
-        if m: own.append((m[1], m[2], m[3]))   # (lock key, tested, actual)
+        if m and not (jit_mac() and m[1] == 'metal_macosx'): own.append((m[1], m[2], m[3]))   # (lock key, tested, actual)
+        elif b.startswith('metal_macosx: ') and jit_mac(): continue
         elif not (b.startswith('metal_iphoneos: ') and b.endswith(' / actual missing') and not ios_target()): bad.append(b)   # a Mac without the iOS platform
     if bad: return bad
     metal = own
