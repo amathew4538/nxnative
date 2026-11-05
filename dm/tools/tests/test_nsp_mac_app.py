@@ -317,7 +317,7 @@ class PackReuse(unittest.TestCase):
 
     def test_unpacked_files_and_unselected_split_pairs_do_not_invalidate(self):
         self.pack()
-        for name in ('msl/k.metal', 'msl/_b_build.json', 'msl/analysis/report.txt', 'patched/main.sites.tsv', 'profile/game.tsv',
+        for name in ('msl/_b_build.json', 'msl/analysis/report.txt', 'patched/main.sites.tsv', 'profile/game.tsv',
                      'font/readme.txt', 'pso/analysis.txt', 'split.tsv'):
             p = self.tmp / name; p.parent.mkdir(exist_ok=True); p.write_text('not packed'); self.assert_reused()
         (self.tmp / 'split.tsv').unlink(); self.assert_reused()
@@ -341,6 +341,14 @@ class PackReuse(unittest.TestCase):
                     self.assertFalse(Path(self.args.out + '.partial').exists())
                 finally: hidden.rename(p)
                 self.pack()
+
+    def test_jit_metal_source_is_selected_and_packed(self):
+        (self.tmp / 'msl/k.metallib').unlink()
+        (self.tmp / 'msl/k.metal').write_text('source')
+        self.pack()
+        self.assertEqual((Path(self.args.out) / 'Contents/Resources/msl/k.metal').read_text(), 'source')
+        (self.tmp / 'msl/k.metal').write_text('changed')
+        self.assert_repacked()
 
     def test_failed_repack_drops_key_and_keeps_old_app(self):
         self.pack()
@@ -780,6 +788,15 @@ class Script(unittest.TestCase):
         shutil.rmtree(tmp / 'pso')
         o, _ = self.pack_cmd('nvn', work=tmp, no_bases=True)   # every eligible pair has function constants: pso_offline.py makes no archive, the app is packed without one
         self.assertNotIn('--pso', o); self.assertIsNotNone(self.pso_cmd)
+
+    def test_jit_shader_sources_skip_pso_archive(self):
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
+        (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
+        (tmp / 'shader/cache/b-0123456789ab').mkdir(parents=True)
+        (tmp / 'shader/cache/b-0123456789ab/k_b.metal').write_text('source')
+        o, _ = self.pack_cmd('nvn', work=tmp)
+        self.assertNotIn('--pso', o)
+        self.assertIsNone(self.pso_cmd)
 
     def test_pso_archive_failure_is_a_warning(self):   # the archive is an optimization: without it the app builds the bases on its first start
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)

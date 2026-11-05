@@ -2353,8 +2353,8 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     PROG.watch(None)
     if not seen and not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
     what = 'Mac' if mac else 'iOS'
-    mac_output = '*_b.metal' if mac else '*_b.metallib'
-    n = sum(1 for _ in libs.glob(mac_output)) if libs.is_dir() else 0
+    mac_outputs = ('*_b.metal', '*_b.metallib') if mac else ('*_b.metallib',)
+    n = sum(1 for pat in mac_outputs for _ in libs.glob(pat)) if libs.is_dir() else 0
     if n == 0: raise BuildError(f'no {what} shader libraries in {libs}')
     say(f'{n} {what} shader libraries ({libs})')
     if keep_mac: say(f'{sum(1 for _ in (sh / "cache" / f"b-{chain}").glob("*_b.metallib"))} Mac shader libraries kept for the Mac run command ({sh / "cache" / f"b-{chain}"})')
@@ -2624,6 +2624,9 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     and the bases (about 615 MB for Breath of the Wild) do not go into the player's ~/Library/Application Support. gpus: --gpu / PSO_GPUS (empty: this Mac's GPU; none: no archive, the app
     builds the bases on its first start). Made again only when its inputs change (pso_offline.py's key). Returns the folder, or None"""
     if gpus == 'none': say('pipeline archive: none (--gpu none): the app builds the pipeline bases on its first start'); return None
+    if any(lib.glob('*.metal')) and not any(lib.glob('*.metallib')):
+        say('pipeline archive: none (Mac JIT shader sources): the app builds the pipeline bases on its first start')
+        return None
     if gpus and not re.fullmatch(r'(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS takes GPU architectures such as g14s, or none: {gpus}')
     try: here = mac_gpu_arch(work, env, logs)
     except BuildError:
