@@ -2636,7 +2636,7 @@ def parse_args(argv):
                     '(dm/gfx/tools/dmsh_chain.lock, Xcode 27.1) instead of stopping; such shaders can render wrong pictures')
     ap.add_argument('--metal-shaders', choices=('jit', 'precompiled'), default=METAL_SHADER_MODE,
                     help='Mac Metal shader mode: jit compiles MSL on first use; precompiled packages macOS metallibs (default: %(default)s)')
-    ap.add_argument('--profile-out', help='where the provisional profile goes (default: <NSP folder>/<title ID>_build/profile)')
+    ap.add_argument('--profile-out', help='where the provisional profile goes (default: <NSP folder>/<title ID>_build/profile) '
                     '(dm/gfx/tools/dmsh_chain.lock, Xcode 27.2) instead of stopping; such shaders can render wrong pictures')
     ap.add_argument('--profile-out', help='where the provisional profile goes (default: <build folder>/profile: <NSP folder>/<title ID>_build/profile, or under --work-dir)')
     ap.add_argument('--provisional', action='store_true', help='build from a provisional profile even when dm/games has one for the game (tests the guesses)')
