@@ -57,6 +57,16 @@ class Prereqs(unittest.TestCase):
         self.check(mac=True, sdk_rc=1)
         self.assertFalse(any('iphoneos' in c for c in self.calls))
 
+    def test_jit_does_not_check_the_metal_compiler(self):
+        with mock.patch.object(nsp, 'METAL_SHADER_MODE', 'jit'):
+            self.check(mac=True)
+        self.assertFalse(any('metal' in c for c in self.calls))
+
+    def test_ios_jit_still_checks_the_metal_compiler(self):
+        with mock.patch.object(nsp, 'METAL_SHADER_MODE', 'jit'):
+            self.check()
+        self.assertTrue(any('metal' in c for c in self.calls))
+
     def test_translator_runs_once_with_the_scripts_environment(self):
         run = mock.Mock(side_effect=fake_run())
         with tempfile.TemporaryDirectory() as d, mock.patch.object(nsp.subprocess, 'run', run):
