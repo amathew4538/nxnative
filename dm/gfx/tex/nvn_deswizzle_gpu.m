@@ -1,7 +1,7 @@
 #import "nvn_deswizzle_gpu.h"
 #import "../nvn/host_msl.h"
 
-static id<MTLComputePipelineState> g_nvn_deswz_pipeline;
+static id<MTLComputePipelineState> g_nvn_deswz_pipeline, g_nvn_deswz_direct;
 
 // The kernels deswz and deswz_direct: dm/gfx/msl/deswz.metal
 
@@ -14,6 +14,8 @@ int nvn_deswz_gpu_init(id<MTLDevice> dev) {
     id<MTLFunction> function = [library newFunctionWithName:@"deswz"];
     if (!function) return -1;
     g_nvn_deswz_pipeline = [dev newComputePipelineStateWithFunction:function error:&error];
+    id<MTLFunction> direct = [library newFunctionWithName:@"deswz_direct"];
+    if (direct) g_nvn_deswz_direct = [dev newComputePipelineStateWithFunction:direct error:&error];
     return g_nvn_deswz_pipeline ? 0 : -1;
 }
 

@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <mach/mach.h>
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
@@ -17,6 +18,7 @@
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
 #define RESERVE DM_GAME_MEM_RESERVE   // SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
 static uint8_t *g_as;              // ASLR region base = the whole block
+static size_t g_reserve;           // its size: RESERVE, or more with a DM_ALIAS_SIZE alias region
 static uint8_t *g_heap; static _Atomic size_t g_heap_cur; static size_t g_heap_cap;
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
@@ -33,16 +35,22 @@ static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_page
 static uint64_t *g_alias_exposed;   // one bit per host page ever opened; protected by g_map_lock
 static uint8_t *g_stack; static size_t g_stack_cap;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
-int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
+int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 
 static void *alias_windows_thread(void *arg);
+static void *regions_thread(void *arg);
 static void mem_init_once(void) {
     size_t pg = (size_t)getpagesize();
     if (RESERVE < 0x10000000 || DM_GAME_MEM_ALIAS > RESERVE - 0x10000000 ||
         DM_GAME_MEM_STACK > RESERVE - 0x10000000 - DM_GAME_MEM_ALIAS ||
         ((RESERVE | DM_GAME_MEM_ALIAS | DM_GAME_MEM_STACK) & (pg - 1)))
         die("guest address-space profile has invalid native boundaries");
-    g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    // DM_ALIAS_SIZE=<bytes>: an alias region of that size instead of the profile's, the heap and stacks as they are; the block grows with it. A Switch-sized one (64 GB) holds what
+    // a game reserves unchanged, for measuring its address regions on the Mac (the NSP script's heap check); an iPhone has no room for more than the profile's
+    size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
+    if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
+    g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
+    g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
@@ -50,14 +58,16 @@ static void mem_init_once(void) {
     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
     //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
     // The alias and stack sizes come from the game profile (mem_alias / mem_stack), the heap takes the rest; Mario: alias 0xB8000000, stack 0x10000000 → stack at +0xC8000000, heap at +0xD8000000
-    g_alias = g_as + 0x10000000; g_alias_cap = DM_GAME_MEM_ALIAS;
+    g_alias = g_as + 0x10000000; g_alias_cap = alias;
     g_stack = g_alias + g_alias_cap; g_stack_cap = DM_GAME_MEM_STACK;
-    g_heap  = g_stack + g_stack_cap; g_heap_cap  = RESERVE - (size_t)(g_heap - g_as);
+    g_heap  = g_stack + g_stack_cap; g_heap_cap  = g_reserve - (size_t)(g_heap - g_as);
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
-    LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
+    LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
     const char *aw = getenv("DM_ALIAS_WINDOWS");
     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
+    const char *rf = getenv("DM_REGIONS");
+    if (rf && *rf) { pthread_t th; if (!pthread_create(&th, NULL, regions_thread, (void *)rf)) pthread_detach(th); }
 }
 static void mem_init(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -74,7 +84,8 @@ static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++)
 // Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,
 // and the heap it opens = pool − 64 MB − 1.75 GB virtual address memory − 1 MB = 0x5be00000, as on hardware); Metroid Dread's main has about 1.8 GB of bss, the engine's static heap, which the Switch counts as used;
 // without it the game asks for pool − 64 MB = 3.15 GB of heap
-static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (g_mod[i].patch_off < 0) n += g_mod[i].size - g_mod[i].file_image_len; return n; }
+// Like image_bytes, exclude NROs: their buffers already belong to the game's heap. Counting every offline-mapped NRO's bss made FFX/X-2's used memory exceed its pool before any LoadModule.
+static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro && g_mod[i].patch_off < 0) n += g_mod[i].size - g_mod[i].back_len - g_mod[i].file_image_len; return n; }
 
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
 void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_reserve; }
@@ -236,6 +247,7 @@ static void module_readonly_run(uint64_t off, uint64_t start, uint64_t end,
 static void module_data_query(const module_t *m, uint64_t off, uint64_t *lo, uint64_t *hi, uint64_t *perm) {
     module_readonly_run(off, 0, (m->text_end + 0x3fff) & ~UINT64_C(0x3fff), lo, hi, perm);
     if (m->patch_off > 0) module_readonly_run(off, (uint64_t)m->patch_off & ~UINT64_C(0x3fff), m->size, lo, hi, perm);
+    if (m->back_len) module_readonly_run(off, m->back_off, m->back_off + m->back_len, lo, hi, perm);
     module_readonly_run(off, m->key_page_off, m->key_page_off + m->key_page_size, lo, hi, perm);
 }
 static int map_source_backed(uint64_t src, uint64_t size) {
@@ -245,14 +257,23 @@ static int map_source_backed(uint64_t src, uint64_t size) {
     if (memory_contains((uintptr_t)g_alias, g_alias_cap, src, size))
         return !alias_unmapped(src - (uintptr_t)g_alias, size);
     module_t *m = module_of((void *)(uintptr_t)src);
-    // NRO reload restores backing outside this lock; it cannot be borrowed until
-    // that lifetime is integrated. Static module data is permanent.
-    if (!m || m->nro || !m->loaded || !memory_contains((uintptr_t)m->base, m->size, src, size)) return 0;
+    // Active NRO data is valid backing too (FFX/X-2's launcher allocates thread stacks from its bss). Deactivation below checks borrowers under this same lock before reload can restore it.
+    if (!m || !m->loaded || !memory_contains((uintptr_t)m->base, m->size, src, size)) return 0;
     uint64_t lo = m->data_off ? m->data_off : (m->ro_off ? m->ro_off : m->text_end);
-    uint64_t hi = m->patch_off > 0 ? (uint64_t)m->patch_off : m->size;
+    uint64_t hi = m->patch_off > 0 ? (uint64_t)m->patch_off : m->back_len ? m->back_off : m->size;
     uint64_t off = src - (uintptr_t)m->base, perm = 3;
     module_data_query(m, off, &lo, &hi, &perm);
     return perm == 3 && hi >= lo && memory_contains(lo, hi - lo, off, size);
+}
+int svc_nro_deactivate(module_t *m) {
+    pthread_mutex_lock(&g_map_lock);
+    uint64_t base = (uintptr_t)m->base;
+    for (int i = 0; i < g_nmap; i++)
+        if (g_map[i].src < base + m->size && base < g_map[i].src + g_map[i].size) {
+            pthread_mutex_unlock(&g_map_lock); return 0;
+        }
+    m->loaded = 0;
+    pthread_mutex_unlock(&g_map_lock); return 1;
 }
 static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint32_t *attr, uint64_t *perm) {
     uint64_t lo = *base, remaining = *size; // the final free page can end at 2^64
@@ -522,8 +543,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
         else if (in_alias && mapped) { base=rb; size=rn; state=5; perm=3; }
-        else if (a >= g_as && a < g_as + RESERVE) {   // free: up to the adjacent mapping/heap boundary
-            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + RESERVE;
+        else if (a >= g_as && a < g_as + g_reserve) {   // free: up to the adjacent mapping/heap boundary
+            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + g_reserve;
             if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
             else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
             if (in_alias) {
@@ -549,9 +570,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // The SDK's C++ exception unwinding (nn::ro::detail::GetExceptionInfo) walks back from the PC over "Code+RX" regions to find the module start, forward over Code then CodeData to find its end, then reads MOD0 at the module start for .eh_frame_hdr.
             // Previously "the 4 KiB page around it, Code+RX" was reported: the backward walk ran on into other memory, found no MOD0 and aborted (Engage's IL2CPP throws a C++ exception for every managed exception).
             // The rewriter's patch area is reported as CodeData+RX: modules sit back to back in the host, and an executable patch area reported as Code+RX would merge the previous module into the backward walk
-            // Modules with the patch area before the base (patch_off < 0): the patch area is reported alone as CodeData+RX, and data and bss run to the end of the image
+            // Modules with the patch area before the base (patch_off < 0): the patch area is reported alone as CodeData+RX, and data and bss run to the end of the image, or to a back patch area
+            // (patch_nso.py TWO), which is reported as CodeData+RX like a patch area after the image
             module_t *mm = module_of(a); uint64_t off = (uint64_t)(a - mm->base), mb = (uint64_t)mm->base;
-            uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off > 0 ? (uint64_t)mm->patch_off : mm->size;
+            uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off > 0 ? (uint64_t)mm->patch_off : mm->back_len ? mm->back_off : mm->size;
             if (a < mm->base)  { base = mb + mm->patch_off; size = mm->patch_len; state = 4/*CodeData*/; perm = 5; }
             else if (off < ro) { base = mb;      size = ro;            state = 3/*Code*/;     perm = 5; }
             else if (off < da) { base = mb + ro; size = da - ro;       state = 3/*Code*/;     perm = 1; }
@@ -661,7 +683,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_PriorityMask: v = 0; break;
         case I_AliasAddr: v = (uint64_t)g_alias; break;   case I_AliasSize: v = g_alias_cap; break;
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
-        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = RESERVE;     break;
+        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;   break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
         case I_UsedMem:  case I_UsedNonSys:  pthread_mutex_lock(&g_map_lock);

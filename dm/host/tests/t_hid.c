@@ -2,6 +2,7 @@
 // game's supported npad ids; no controller, window or guest exists in this test (the hid take-overs are called directly, events are recorded by the stubs)
 #include <time.h>
 #include <unistd.h>
+#include <sched.h>
 static int hid_clock_gettime(clockid_t clock, struct timespec *ts);
 static int hid_usleep(useconds_t usec);
 #define clock_gettime hid_clock_gettime
@@ -16,6 +17,7 @@ void front_web_shot(const char *path) { (void)path; }
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;
 static time_t rumble_second = 1;
+static uint64_t motion_now = 1000000000ull;
 static void (*script_hold)(void);
 static int hid_clock_gettime(clockid_t clock, struct timespec *ts) { (void)clock; *ts = (struct timespec){.tv_sec = rumble_second}; return 0; }
 static int hid_usleep(useconds_t usec) { (void)usec; if (script_hold) script_hold(); return 0; }
@@ -41,11 +43,15 @@ void dm_gfx_texlist(int target) { (void)target; }
 void dm_gfx_restop(void) {}
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }
+void crash_dump_now(const char *why) { (void)why; }
 void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path) { (void)a; (void)n; (void)path; }
 void dm_ctl_cvar_i32(uint64_t off, int32_t v) { (void)off; (void)v; }
 void dm_ctl_cvar_f32(uint64_t off, float v) { (void)off; (void)v; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_passdump_next(long n) { (void)n; }
+static int applet_depth, applet_opens, applet_closes_at_depth0;   // hle_oe.c: the applet stand-ins open and close their applet around the answer
+void dm_applet_enter(const char *name) { (void)name; applet_depth++; applet_opens++; }
+void dm_applet_leave(void) { applet_closes_at_depth0 += --applet_depth == 0; }
 
 static uint64_t buttons_of(uint32_t id, uint32_t style) { NpadState s; fill(&s, id, style); return s.attributes ? s.buttons & 0xffff : 0; }
 static int32_t lx_of(uint32_t id) { NpadState s; fill(&s, id, STYLE_FULLKEY); return s.lx; }
@@ -96,6 +102,7 @@ static void t_npads(void) {
     CHECK(h_hid_Led(&(uint32_t){0}) == 0x1 && h_hid_Led(&(uint32_t){1}) == 0x3 && h_hid_Led(&(uint32_t){7}) == 0x6, "player LED patterns");
     int32_t info[2]; int8_t arg[8] = {1, 4};
     CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2 && info[1] == 0, "the controller applet reports two players, player 1 selected");
+    CHECK(applet_opens == 1 && applet_depth == 0 && applet_closes_at_depth0 == 1, "the controller applet opens and closes once around its answer (focus 2, then 1)");
     arg[1] = 1; h_hid_ShowCtrl(info, arg);
     CHECK(info[0] == 1, "the applet's count is capped at the game's maximum");
     arg[0] = 3; arg[1] = 4;
@@ -371,6 +378,116 @@ static void t_rec(void) {
     CHECK(g_nsteps == 50000 && g_steps[49999].at == 99998, "all 50,000 steps of the file are parsed");
     free(g_steps); g_steps = NULL; g_nsteps = g_cap_steps = 0;
     CHECK(!keys_file(path), "a missing steps file reads as none");
+}
+
+// Live controller motion (dm_motion_set): player 1's six-axis sensor reports the controller's tilt and rotation instead of lying flat, and goes back to flat when cleared
+static _Atomic int motion_ready, motion_go;
+static void *motion_sender(void *arg) {
+    int p = (int)(intptr_t)arg;
+    atomic_fetch_add(&motion_ready, 1);
+    while (!atomic_load(&motion_go)) sched_yield();
+    for (int i = 0; i < 100; i++) {
+        dm_motion_set(p, (float[]){0, 0, -1}, (float[]){0, 0, 1});
+        dm_motion_set_hid(p, (float[]){0, 0, -1}, (float[]){0, 0, 1}, motion_now);
+        if (!p) dm_motion_set_switch(0, (float[]){0, 0, -1}, (float[]){0, 0, 0});
+        dm_motion_clear(p);
+        dm_motion_clear_hid(p);
+    }
+    return NULL;
+}
+static void t_motion_threads(void) {
+    pthread_t threads[DM_PLAYERS];
+    for (int p = 0; p < DM_PLAYERS; p++) CHECK(!pthread_create(&threads[p], NULL, motion_sender, (void *)(intptr_t)p), "start concurrent first motion sample");
+    while (atomic_load(&motion_ready) != DM_PLAYERS) sched_yield();
+    atomic_store(&motion_go, 1);
+    for (int p = 0; p < DM_PLAYERS; p++) pthread_join(threads[p], NULL);
+    g_phone_motion.last_ns = 0;   // the following test starts with no live source
+}
+static void t_motion_live(void) {
+    g_mode = 1; dm_pad_players(1);
+    atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);   // no shake: the clocks here stand at 1 s, so the cycle t_script's shake finishes would never end
+
+    uint32_t h; uint32_t id = 0;
+    CHECK(h_hid_SixHandles(&h, 1, &id, STYLE_FULLKEY) == 1, "one six-axis handle for player 1");
+    SixAxisState st[2];
+    CHECK(h_hid_SixStates(st, 2, &h) == 2 && st[0].acc[2] == -1 && st[0].acc[0] == 0, "no live motion: flat");
+    float a[3] = {0.5f, 0, -0.8660254f}, w[3] = {0, 0, 3.14159265f};
+    dm_motion_set(0, a, w);
+    CHECK(h_hid_SixStates(st, 2, &h) == 2, "live: every entry");
+    CHECK(fabsf(st[0].acc[0] - 0.5f) < 1e-4f && fabsf(st[1].acc[0] - 0.5f) < 1e-4f, "live: the controller's acceleration");
+    CHECK(fabsf(st[0].gyro[2] - 0.5f) < 1e-4f, "live: rad/s to revolutions/s");
+    CHECK(fabsf(-st[0].dir[2] - 0.5f) < 0.01f, "live: primed tilted with the measured gravity");
+    CHECK(st[0].sampling == st[1].sampling + 1, "live: numbered by time");
+    CHECK(!h_hid_SixRest(&h), "live and turning: not at rest");
+    dm_motion_clear(0);
+    CHECK(h_hid_SixStates(st, 1, &h) == 1 && st[0].acc[0] == 0 && st[0].acc[2] == -1, "cleared: flat again");
+    CHECK(h_hid_SixRest(&h), "cleared: at rest");
+
+    // Auto uses fresh controller data ahead of the phone, including when the phone publishes last.
+    dm_motion_set(0, a, w);
+    dm_motion_set_switch(0, (float[]){0, -1, 0}, (float[]){0, 0, 0});
+    h_hid_SixStates(st, 1, &h);
+    CHECK(fabsf(st[0].acc[0] - 0.5f) < 1e-4f, "auto: phone samples do not replace a fresh controller");
+    dm_motion_clear(0);
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[1] == -1 && fabsf(st[0].dir[5] - 1) < 1e-4f, "auto: disconnect falls back to the phone's own upright orientation");
+    motion_now += MOTION_STALE_NS + 1;
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[2] == -1 && st[0].acc[1] == 0, "stale phone data falls back to flat");
+
+    dm_motion_set_switch(0, (float[]){0, -1, 0}, (float[]){0, 0, 0});
+    dm_motion_set(0, a, w);
+    g_phone_mode = 1;
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[1] == -1, "forced phone: a controller publishing last cannot replace it");
+    g_phone_mode = 0;
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[0] == a[0], "phone off: controller remains live");
+    dm_motion_clear(0);
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[2] == -1 && st[0].acc[1] == 0, "phone off: a fresh phone cannot take over");
+
+    // The same controller slot must drive buttons and motion when a game supports only one player.
+    dm_pad_players(3); ids((uint32_t[]){0, NPAD_HANDHELD}, 2);
+    dm_motion_set(1, a, w);
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[0] == a[0] && !h_hid_SixRest(&h), "one-player game: player 2's controller also drives player 1's motion");
+    ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
+    h_hid_SixStates(st, 1, &h);
+    CHECK(st[0].acc[2] == -1 && h_hid_SixRest(&h), "co-op: player 2's motion stays on its own sensor");
+    dm_motion_clear(1); dm_pad_players(1); g_phone_mode = -1;
+}
+static void t_motion_hid(void) {
+    g_mode = 1; dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); g_phone_mode = 0;
+    uint32_t h = 0; SixAxisState st;   // SixAxisSensorHandle uses the style bit index (FullKey = 0), unlike VibrationDeviceHandle's SDK style = 3.
+    float flat[3] = {0, 0, -1}, tilted[3] = {.5f, 0, -.8660254f}, turn[3] = {0, 0, 2 * (float)M_PI};
+    motion_now += 1000000000;
+    dm_motion_clear(0);
+    for (int i = 0; i < 3; i++) dm_motion_set_hid(0, flat, turn, motion_now - (2 - i) * 5000000);
+    h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == 0 && fabsf(st.angle[2] - .01f) < 1e-6f, "HID: batch integrates two 5 ms intervals, independently of GC arrival time");
+    dm_motion_set_hid(0, tilted, (float[]){0, 0, 0}, motion_now - 5000000);
+    dm_motion_set_hid(0, tilted, turn, motion_now + 1);
+    dm_motion_set_hid(0, tilted, turn, motion_now - MOTION_STALE_NS - 1);
+    h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == 0 && st.gyro[2] > .99f && fabsf(st.angle[2] - .01f) < 1e-6f, "HID: reordered, future and stale samples cannot rewind or replace the orientation");
+    motion_now += 1000000; dm_motion_set(0, tilted, turn);
+    h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == .5f && st.angle[2] == 0, "HID: usable GC motion takes over with its independent orientation");
+    dm_motion_clear(0); h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == 0 && fabsf(st.angle[2] - .01f) < 1e-6f, "HID: GC removal reveals raw source's independent orientation");
+    dm_motion_clear_hid(0); h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == 0 && st.acc[2] == -1 && st.angle[2] == 0, "HID: removing both controller sources returns to flat");
+    dm_motion_set_hid(0, flat, turn, motion_now); h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == 0 && st.angle[2] == 0, "HID: reconnect starts a new orientation");
+    motion_now += MOTION_STALE_NS + 1; dm_motion_set(0, tilted, turn); h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == .5f, "HID: stale raw stream yields to live GC motion");
+    dm_motion_set_hid(1, flat, turn, motion_now); h_hid_SixStates(&st, 1, &h);
+    CHECK(st.acc[0] == .5f, "HID: another player's raw data stays on its own sensor");
+    dm_motion_set_hid(0, flat, turn, motion_now); dm_motion_set_switch(0, (float[]){0, -1, 0}, (float[]){0, 0, 0}); g_phone_mode = 1;
+    h_hid_SixStates(&st, 1, &h); CHECK(st.acc[1] == -1, "HID: forced phone selection still wins");
+    dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
+    dm_pad_players(1); g_phone_mode = -1;
 }
 
 int main(void) {

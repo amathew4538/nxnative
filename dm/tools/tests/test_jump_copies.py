@@ -14,7 +14,7 @@ from capstone.arm64 import ARM64_OP_IMM
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
-from nso_asm import ADRP, ADDI, ADDR, B, BLR, BR, NOP
+from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 
 # patch_nso.py is a command-line program whose top level loads and rewrites an image.
 # Compile its actual recognition functions without executing that driver.

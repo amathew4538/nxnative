@@ -77,7 +77,22 @@ int main(void) {
     CHECK(h_fs_MountRomIdx("rom2", 0, NULL, 0) == RES_OK && read_fs("rom2:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "SDK 19: MountRom with a program index mounts the RomFS");
     CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "the overlay file wins"); CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "falls back to the base when the overlay lacks the file");
     uint64_t rh; CHECK(h_fs_OpenFile(&rh, "rom:/data/same", MODE_WRITE) == RES_FAIL, "the two-layer mount refuses writes");
+    CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");
+    CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
+    unsetenv("DM_ROMFS_OVERLAY");
+    {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
+        char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);
+        mkfifo(fifo, 0644);
+        const char *paths[2] = {gone, fifo};
+        for (int i = 0; i < 2; i++) {
+            fflush(NULL); pid_t pid = fork();
+            if (!pid) { freopen(out, "w", stderr); setenv("DM_ROMFS", paths[i], 1); h_fs_MountRom("rom", NULL, 0); _exit(0); }
+            int st = 0; waitpid(pid, &st, 0);
+            char line[512] = {0}; FILE *f = fopen(out, "r"); if (f) { fread(line, 1, sizeof line - 1, f); fclose(f); }
+            CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT && strstr(line, "FATAL the game files") && strstr(line, paths[i]), "%s game files stop the rom mount", i ? "a fifo as the" : "missing");
+        }
+    }
 
     printf("RomFS image\n");   // written by hand in romfs_image.py's layout: /data/a = "hello", /data/b empty directory, /data/c = "xy"
     {   uint8_t img[32 + 7 + 5 * 24 + 7] = {0}; uint64_t hd[3] = {39, 5 * 24 + 7, 5};
@@ -117,6 +132,8 @@ int main(void) {
         CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 4, "the listing merges both, once each (%lld)", (long long)cnt);
         int seen = 0; for (int i = 0; i < cnt; i++) { if (!strcmp(de[i].name, "a")) seen += de[i].size == 3; if (!strcmp(de[i].name, "b")) seen += de[i].type == ENT_DIR; if (!strcmp(de[i].name, "c")) seen += de[i].size == 2; if (!strcmp(de[i].name, "new")) seen += de[i].size == 5; }
         CHECK(seen == 4, "with the right types and sizes"); h_fs_CloseDirectory(h);
+        CHECK(read_fs("rom:\\data\\a", got, sizeof got) && !strcmp(got, "mod") && read_fs("rom:\\data\\c", got, sizeof got) && !strcmp(got, "xy"), "backslash paths reach the overlay folder and the image");
+        h = 0; cnt = -1; CHECK(h_fs_OpenDirectory(&h, "rom:\\data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 4, "and list the merged directory (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
         snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;

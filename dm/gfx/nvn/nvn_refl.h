@@ -1,13 +1,15 @@
 // Shader reflection json → fixed-length C arrays (A: PC chain reflection; B: reflection produced by translating the original Switch shaders, route = "B", output of tools/dmsh_build.py).
 // Kinds added by B: SBUFP = storage buffer device pointer (NVN storage buffer slot); SUPPORT = Ryujinx auxiliary constants; C1 = the shader's own constant segment (c[1]);
 //            DRV0 / DRV2 = NVN driver constant segments c[0] (storage buffer address table) / c[2] (texture and sampler handle table)
+// The json names a binding's kind with a string, DMSH_KIND_* in dmsh_abi.h (one definition for the build and the host); nvn_refl.m maps each to one of the NVN_RB_* codes below, which only the host uses
 // PC shader reflection json → fixed-length C arrays (converted once when the shader is fetched; each draw only walks the arrays and does not touch NSDictionary / NSString).
 // Unit test tests/t_refl.m computes the expectations by hand from real reflection.
 #pragma once
 #include <stdint.h>
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
-       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML };
+       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML, NVN_RB_IMGU, NVN_RB_TBUFU };
+// IMGU / TBUFU: an image / a buffer texture whose handle the game keeps in uniform slot reg at byte off, as TEXU (Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Read at encode time
 // GMEM: the host's memory pool table for global memory the translator traced to no storage buffer (dmsh_abi.h DMSH_GMEM_MAP_*, nvn_mtl.m gmem_map_gpu): the shader may read, and with rw
 // write, anything in any pool. GMEML: the write log of those stores (dmsh_abi.h DMSH_GMEM_LOG_*, nvn_mtl.m gml_take)
 // TEXP / SAMPP: the texture / sampler pool as one array indexed by the handle's ID, for a handle the translator traced to no slot (dmsh_build.py pool_arrays): one argument buffer entry,
@@ -33,7 +35,9 @@ typedef struct {
     uint8_t dtt, dpf;        // Dummy texture when the texture slot is unbound: MTLTextureType value, pixel class
     uint16_t reg, aid;       // D3D register number, index within the argument buffer
     uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer; SBUFU: of the 64-bit storage buffer address
-    uint8_t n;               // TEXD / SAMPD, and TEXU / SAMPU arrays (element k = the handle at byte 8k of the uniform buffer): array length (argument buffer entries aid .. aid + n - 1)
+    uint16_t n;              // TEXD / SAMPD, TEXA / SAMPA, and TEXU / SAMPU arrays (element k = the handle at byte 8k of the uniform buffer): array length (argument buffer entries aid .. aid + n - 1)
+    uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none; TEXU / SAMPU: byte of the other word ORed into the handle (handle type 1) + 1, in uniform slot sreg, 0 = none
+    uint8_t sreg;
     uint8_t f1d;             // TEX: read by 1D integer fetches as 2D rows of 16384 texels (dmsh_build.py "fetch1d"): a buffer texture here is bound as such rows (nvn_mtl.m tbuf_as_2d)
     uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_build.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
@@ -51,6 +55,7 @@ typedef struct {
     uint8_t bindless;        // Has TEXU / SAMPU bindings (which texture is read is known only at replay time)
     uint8_t border;          // index in b of the BORDER binding + 1, 0 = none
     uint8_t dyn;             // Has TEXD / SAMPD bindings: c2's texture and sampler tables hold slot indices for this shader
+    uint8_t pool;            // Has TEXP / SAMPP bindings (it also sets bindless): its argument block holds pool addresses, which change when a pool is rebuilt
     uint8_t drv_read[3];     // B: reads driver segments c0 / c2 at runtime (indices 0, 2; gathered statically from the MSL at packaging time, tools/dmsh_build.py drv_reads)
     uint16_t c1_len;         // Length of the c1 constant segment (B; 0 / 256 / 512 / 768 across the whole library)
     // For the fully-covering-first-draw proof (dmsh_build.py raster_facts; missing field = not provable): vertex - position xyz taken as-is from attribute pos_attr (-1 = no), w is the constant 1 (pos_w1) or taken from the same attribute's .w;

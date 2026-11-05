@@ -93,6 +93,10 @@ static void *m_TryRealloc(void *self, void *p, size_t n, uint32_t a) { (void)sel
 static void m_Free(void *self, void *p) { (void)self; release(p); }
 static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return malloc_good_size(n); }
 static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = malloc_size(p); return true; }
+static void *m_Malloc32(void *self, uint32_t n, uint32_t a) { return m_Malloc(self, n, a); }
+static void *m_Realloc32(void *self, void *p, uint32_t n, uint32_t a) { return m_Realloc(self, p, n, a); }
+static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; size_t q = malloc_good_size(n); return q > UINT32_MAX ? n : (uint32_t)q; }
+static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)malloc_size(p); return true; }
 static void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
 static void *g_vt[NSLOT];
 static const char *g_what;

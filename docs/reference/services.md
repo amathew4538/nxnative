@@ -246,6 +246,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host reports add-on content from `DM_AOC_DIR`, one numbered folder per DLC index (title ID − base − 0x1000) holding that DLC's RomFS. `build_ipa_from_nsp.py` extracts the DLC NSPs in the folder with `nx_extract --aoc`, `build_ipa.sh` copies them to `<App>/aoc/`, and the app sets `DM_AOC_DIR`. `aoc::CountAddOnContent` / `ListAddOnContent` report those indices (`hle_misc.c`), and `fs::MountAddOnContent` mounts the folder read-only (`hle_fs.c`). D2R keeps its fixed `{1}` without `DM_AOC_DIR`; `DM_AOC_OWNED=0` reports none.
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): its two DLC packages each hold one empty marker file (`e0`, `h0`), and the content is already in update 2.0.0. `DLCManager.RefreshHasList` marks a content owned when its mount succeeded (probe `main+0x29f3c88`).
 
+### Owned add-on content lists beyond 64 entries
+
+- **Symptom:** some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents.
+- **Cause:** `hle_misc.c` stored only 64 indices and stopped reading `DM_AOC_DIR` when that array filled, before sorting. The omitted indices depended on directory order; its 256-byte log buffer also truncated longer lists.
+- **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
+- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
+
 ### Add-on content mount cache sized as RomFS working memory
 
 - **Symptom:** SIGSEGV in `crypto::detail::CbcModeAes128Helper::DecryptBlocks` with a null destination (`main+0x8737e8`, right after `aoc:` is mounted).
@@ -519,6 +527,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** it returns the static layer (`hle_vi.c`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each).
 
+### `vi::CreateLayer` with `LayerCreationSettings` (SDK 22)
+
+- **Symptom:** SIGSEGV at `sdk+0x44ea94` reading address 0, in `vi::CreateLayer`, right after `am::GetSelfController()`; the caller is the game's window setup (`main+0x978cb6c`).
+- **Cause:** SDK 22 adds `CreateLayer(Layer**, Display*, const LayerCreationSettings*)`; the game builds the settings with the SDK's `LayerCreationSettings(int w, int h)` (`{w, h, 2}`, `sdk+0x4526a0`), and the SDK's `CreateLayer` asks the applet's self controller, which the host never made.
+- **Fix:** the host takes it over like the sized overload (`hle_vi.c`): the static layer, and the size recorded for an EGL surface.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (SDK 22.2.0): 1920x1080.
+
 ### vi layer and display calls without vi service objects
 
 - **Symptom:** SIGSEGV in `vi::SetLayerCrop` or `vi::OpenDisplay` when opening a display by name.
@@ -610,6 +625,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### Creating an ssl context needs no network
+
+- **Symptom:** the game ends right after `nnMain`, with a crash in its own cleanup on an object it had not created yet (DRAGON QUEST BUILDERS 2: `CRASH sig=11 addr=0x60db0` at `main+0x2676c8`, x0 = 0, the callers `main+0x85210` and `main+0x7fabf8`). No red line.
+- **Cause:** `ssl::Context::Create` failed in the host's offline stubs. A context is a session of the console's own ssl service, so it succeeds on Horizon with no network; only a connection needs one. The game's online library treats the failure as fatal, and its startup (`main+0x84a60`) returns false.
+- **Fix:** `Context::Create` and `Context::Destroy` succeed and connect to nothing (`hle_net.c`). `Connection::Create` and the rest still fail, as they do with no network.
+- **Found on:** [DRAGON QUEST BUILDERS 2](../../dm/games/010042000A986000/README.md) (SDK 5.4.0). 53 of 82 games surveyed import the call.
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).
@@ -685,6 +707,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** the first comparison in `nnMain` aborted in `sm`.
 - **Fix:** hooked: `settings::LanguageCode::Make` and the reversed `operator==(LanguageCode, Language)`.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10).
+
+### Chinese language aliases in settings comparisons
+
+- **Symptom:** `DM_LANG=zh-Hans` or `zh-Hant` reaches the game unchanged, but its startup menu falls back to Japanese; the older `zh-CN` or `zh-TW` spelling selects Chinese.
+- **Cause:** Odyssey 1.4.1's language selectors (`main+0x977b30`, `main+0x977d30`) compare the desired code through `settings::operator==(LanguageCode, Language)` with only the deprecated `Language::Chinese` (6) and `Taiwanese` (11) entries, never `SimplifiedChinese` (15) or `TraditionalChinese` (16); its control data lists Simplified and Traditional Chinese, which the NSP script spells `zh-Hans` and `zh-Hant` (it turns `zh-CN` and `zh-TW` into those too). The real operator compares bytes with `MakeLanguageCode`, so on the console the system must hand this game `zh-CN` / `zh-TW`; the host compared bytes the same way with `DM_LANG`'s spelling, so `zh-Hans` did not match `zh-CN` and `zh-Hant` did not match `zh-TW`.
+- **Fix:** both settings equality hooks share an alias-aware comparison (`hle_sdk16.c`): Simplified Chinese's two spellings match each other, as do Traditional Chinese's. The scripts stay distinct; `GetDesiredLanguage`, `LanguageCode::Make` and the available language list keep their original codes and indices. No title-specific override. This stands in for the system's choice of spelling, whose rule per title is not known (open): a game that compares the code with its own strings, or looks up `zh-CN`'s index in the available list, still needs the exact spelling. A synthetic full matrix tests both operand orders, malformed codes and the unchanged list.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (1.4.1, SDK 7.3.2; fresh-save Mac startup menus in Simplified and Traditional Chinese after the comparison fix).
 
 ### Available language codes and their count
 
@@ -806,9 +835,16 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** SDK calls that reach the time service, each aborting in `sm::Initialize` (or found in the imports before they were met).
 - **Fix:**
   - `time::StandardSteadyClock::GetCurrentTimePoint`: host monotonic seconds, fixed source ID; `GetSpanBetween` runs in `sdk` ([The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0, SDK 20.5.22).
-  - `time::ClockSnapshot::CreateWithStandardSystemClock`: 0xD0 bytes, filled on the host from the steady clock, the user clock and the calendar; the network fields stay 0 ([The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3).
+  - `time::ClockSnapshot::CreateWithStandardSystemClock` and `CreateWithAdjustableSystemClock`: 0xD0 bytes, filled on the host from the steady clock, the user clock and the calendar; the network fields stay 0. The type byte at `+0xcd` is 1 for standard and 2 for adjustable snapshots (0 means uninitialized), as verified in [Tears of the Kingdom's SDK](../../dm/games/0100F2C0115B6000/README.md#services). The adjustable entry also dereferences the absent time-service session without a host take-over. `t_time` checks both registrations, guarded buffers, the adjustable calendar and location, and snapshot arithmetic. The adjustable crash and boot fix were reported for Tomodachi Life: Living the Dream in [PR #385](https://github.com/seedds/nxnative/pull/385); that gameplay report has not been repeated here.
   - The adjustable user clock (`time::AdjustableUserSystemClock::GetCurrentTime`, which the game's days follow) reads the time service's shared memory in the SDK (`MonotonicSystemClock::GetCurrentTime`, `sdk+0x4421cc`), which the host never maps, so it is the host's clock, as the user clock; `time::GetStandardSteadyClockCurrentTimePoint`, the free-function form of the steady clock ([Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) SDK 20.5.4, found in `main`'s imports before the first boot).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md).
+
+### Hooks whose return type did not match the SDK
+
+- **Symptom:** a call the host answers reads as failed when it succeeded, or reads leftover register bits. Super Smash Bros. Ultimate refills the Spirit Board at every visit, since the elapsed time between two snapshots never reads as known.
+- **Cause:** four take-overs declared another return type than the SDK's own function: `time::CalculateSpanBetween` returns bool (true when the span is stored), and the host returned a Result 0; `nifm::HandleNetworkRequestErrorResult` returns bool, and the host returned a Result whose low bit happened to be 0; `audio::AcquireAudioDeviceNotificationForOutput` and `pl::BeginVrMode` return a Result, and the host's were `void`. Checked in the `sdk` of SDK 12 to 20 (Metroid Dread `sdk+0x3ab540`, `+0x336210`, `+0x534a0`; Breath of the Wild `sdk+0x412970`).
+- **Fix:** each returns what the SDK does: the span call 1 or 0; the network call 0 (not resolved, offline); the notification 0 the first time and 0x499 (already acquired) after; `BeginVrMode` 0xd08e, the SDK's own answer when `pctl::CheckStereoVisionPermission` refuses, which the host now does too, having no VR display (Breath of the Wild's options then stay 2D, as MacNativeGames found). `t_time` checks the span call's values.
+- **Found on:** reported by MacNativeGames on [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (the Spirit Board) and Breath of the Wild 1.6.0 / 1.9.0 (the VR option); the Spirit Board was not replayed here.
 
 ### `clock_gettime(CLOCK_REALTIME)` through the time source pointer
 
@@ -830,6 +866,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the bytes come from the csrng service. The `sdk` defines `getentropy`, so the host's `getentropy` hook never sees the call, but the call into `nn::crypto` goes through the `sdk`'s PLT.
 - **Fix:** an `HLE_FORCE` on it fills from the host's entropy stream, the same stream as `getentropy` (`hle_os.c`).
 - **Found on:** [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (SDK 16.2.4; one boot), [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11; one boot).
+
+### `clock_gettime` is `nn::time`'s steady clock (SDK 22)
+
+- **Symptom:** `libc++abi: terminating due to uncaught exception of type std::__1::system_error` (the arguments came out as rubbish, the format named the failure) once the game's own code ran, with `sdk+0x5f2e60` (`std::terminate`) and `sdk+0x66ad2c`/`sdk+0x66acc8` (`get_terminate`/`terminate`) in the backtrace.
+- **Cause:** SDK 22's exported `clock_gettime` (`sdk+0xa1430`) accepts `CLOCK_REALTIME` and `CLOCK_MONOTONIC` and returns `ENOTSUP` for ids 2–11; both accepted ids jump through musl ifunc slots in the SDK's data (`sdk+0xba5018`, `sdk+0xba5020`) whose `R_AARCH64_GLOB_DAT` relocations bind `nn::time::GetAdjustableUserSystemClockCurrentTimespec`, `_ZN2nn4time41GetStandardUserSystemClockCurrentTimespecEP8timespec` and **`_ZN2nn4time37GetStandardSteadyClockCurrentTimespecEP8timespec`** (`sdk+0xb92298`). The first two were answered from [the CLOCK_REALTIME entry](#clock_gettimeclock_realtime-through-the-time-source-pointer); the steady one was not, so the SDK's shared-memory client ran, could not read the time service's page, and returned an error, which `std::chrono::steady_clock::now()` (`sdk+0x5f2e10`: `mov w0,#1; bl clock_gettime; cbnz w0` → `std::__1::__throw_system_error`) turned into the exception.
+- **Fix:** `hle_time.c` answers `GetStandardSteadyClockCurrentTimespec` with the host's monotonic clock (`struct timespec` from `clock_gettime(CLOCK_MONOTONIC)`). The network-clock variants (`_ZN2nn4time44GetStandardNetworkSystemClockCurrentTimespecEP8timespec`, `_ZN2nn4time46GetAdjustableNetworkSystemClockCurrentTimespecEP8timespec`) are left unbound: none of the games seen reaches them, and the network clock is not accurate from the host anyway. To name such a failure, `hle_sdk16.c` takes `nn::diag::detail::VAbortImpl` (an assert, an uncaught C++ exception or an SDK check with a message): it logs `[diag] abort at <function>: <expression> (<file>:<line>) message format <format>` and then aborts as `AbortImpl` does. Only the format is printed: the host cannot expand a `va_list` the guest built.
+- **Check:** with `DM_AUDIO=1`, a run to the first room has no `[diag]` line and the frame counter keeps advancing.
+- **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0), in `std::chrono::steady_clock::now()` called from GameMaker's frame-timing helper.
 
 ## Modules and symbols
 

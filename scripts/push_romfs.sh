@@ -24,6 +24,7 @@ else
     python3 -I "$(dirname "$0")/../dm/tools/romfs_image.py" "$@"
 fi
 python3 -I "$(dirname "$0")/../dm/tools/romfs.py" "$img" "${DM_RESOURCE_MARKER:-}"
+echo "identity: $(python3 -I "$(dirname "$0")/../dm/tools/romfs_image.py" --identity "$img")"
 xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$img" --destination Documents/romfs.img -q
 # Add-on content (DLC): <index>.img files or legacy <index>/ trees. devicectl merges directories by default, retaining removed DLC that the host would still report owned.
 # resources.env describes the complete DLC set. An empty set replaces old content with an empty directory, which also takes precedence over bundled DLC at startup.

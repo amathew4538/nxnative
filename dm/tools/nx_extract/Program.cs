@@ -107,6 +107,10 @@ static class P {
             if (icon != null) { File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), icon); Console.WriteLine($"icon {lang} ({icon.Length} bytes)"); }
             else Console.WriteLine("no icon in the control data");
         }
+        if (updProg == null && Sparse(baseProg)) {   // Horizon mounts a sparse NCA only through its patch; alone, the left-out data fails the hash check
+            Console.WriteLine("[RED] the base game's program is sparse: it can be read only with its update NSP");
+            return 4;
+        }
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
         Copy(() => updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(outDir, "ExeFS"), null);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);

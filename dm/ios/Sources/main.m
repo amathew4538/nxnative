@@ -5,11 +5,19 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 #include "front.h"
 #include "romfs_image.h"
+#include "romfs_identity.h"
+#include "player_env.h"
+#ifndef DM_PLAYER_BUILD
+#define DM_PLAYER_BUILD 0
+#endif
+
+extern char **environ;
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 UIViewController *front_ios_root(void);
@@ -59,7 +67,7 @@ static NSString *romfs_locate(NSString *prog) {   // prog: a game of several pro
         // (Tears of the Kingdom: killed on a black screen), so it is moved aside at once and deleted in the background, leftovers of an interrupted delete included
         NSString *old = [doc stringByAppendingPathComponent:@"romfs"], *tmp = NSTemporaryDirectory();
         if ([fm fileExistsAtPath:old] && [fm moveItemAtPath:old toPath:[tmp stringByAppendingPathComponent:[@"romfs-old-" stringByAppendingString:NSUUID.UUID.UUIDString]] error:nil])
-            fprintf(stderr, "boot: Documents/romfs moved aside for deletion (Documents/romfs.img replaces it)\n");
+            fprintf(stderr, "boot: Documents/romfs moved aside for deletion (Documents/%s replaces it)\n", img.lastPathComponent.UTF8String);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
             NSFileManager *bfm = [NSFileManager new];
             for (NSString *n in [bfm contentsOfDirectoryAtPath:tmp error:nil]) if ([n hasPrefix:@"romfs-old-"]) [bfm removeItemAtPath:[tmp stringByAppendingPathComponent:n] error:nil];
@@ -132,13 +140,29 @@ static int boot_env(void) {
     [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
     if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
-    NSMutableArray<NSString *> *from_file = [NSMutableArray array];
+    NSMutableArray<NSString *> *from_file = [NSMutableArray array], *from_launch = [NSMutableArray array];
+    for (char **e = environ; *e; e++) {   // set at launch (Xcode, devicectl): before the env files, and the launcher keeps them
+        const char *eq = strchr(*e, '='); NSString *k = eq && !strncmp(*e, "DM_", 3) ? [[NSString alloc] initWithBytes:*e length:(NSUInteger)(eq - *e) encoding:NSUTF8StringEncoding] : nil;
+        if (k) [from_launch addObject:k];
+    }
+#if DM_PLAYER_BUILD
+    // Player-facing choices belong to the launcher, including saved choices.
+    // Neither old diagnostic files nor bundled defaults may lock those rows.
+    NSMutableSet<NSString *> *launcher_keys = [NSMutableSet set];
+    NSData *settings_data = [NSData dataWithContentsOfFile:[res stringByAppendingPathComponent:@"dm/launcher.json"]];
+    NSDictionary *settings_file = settings_data ? [NSJSONSerialization JSONObjectWithData:settings_data options:0 error:nil] : nil;
+    for (NSDictionary *row in settings_file[@"settings"]) if ([row[@"env"] isKindOfClass:NSString.class]) [launcher_keys addObject:row[@"env"]];
+#endif
     for (NSString *ef in @[[doc stringByAppendingPathComponent:@"env.txt"], [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"env.txt"]]) {
         NSString *txt = [NSString stringWithContentsOfFile:ef encoding:NSUTF8StringEncoding error:nil];
         for (NSString *raw in [txt componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
             NSString *ln = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]; NSRange eq = [ln rangeOfString:@"="];
             if (!ln.length || [ln hasPrefix:@"#"] || eq.location == NSNotFound || !eq.location) continue;
             NSString *k = [ln substringToIndex:eq.location], *v = [ln substringFromIndex:eq.location + 1];
+#if DM_PLAYER_BUILD
+            if (dm_player_diagnostic_key(k.UTF8String) || [launcher_keys containsObject:k] ||
+                ([launcher_keys containsObject:@"DM_METAL_HUD"] && [k isEqualToString:@"MTL_HUD_ENABLED"])) continue;
+#endif
             if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); [from_file addObject:k]; fprintf(stderr, "boot: env %s=%s (%s)\n", k.UTF8String, v.UTF8String, ef.lastPathComponent.UTF8String); }
         }
     }

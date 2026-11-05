@@ -1,5 +1,6 @@
 name	class	meaning
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
+DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the profile's (at least 256 MB, whole host pages; the heap and stacks stay as they are): `0x1000000000`, the Switch's 64 GB, holds what a game reserves unchanged; the NSP script's address region check sets it (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)
 DM_ALLOW_OTHER_METAL	switch	`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock` (it stops otherwise, GitHub issue #242); the NSP script sets it for `--allow-other-metal`
 DM_AOC_DIR	path	Folder of add-on content: one numbered subfolder per DLC index holding that DLC's RomFS, reported by `aoc` and mounted read-only; the app, the Mac launcher and the NSP script set it when the build has DLC
@@ -53,7 +54,10 @@ DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every GLSLC output the game compiles at run time; `shader_split.py` reads it (default `<version dir>/glslc_capture`)
 DM_GL_CAPTURE	path	`=<dir>`: the GL layer writes every shader source the game compiles (`<key>.vert` / `<key>.frag`) for `gl_shaders.py`; the NSP script uses it to capture run-time shaders
+DM_GL_DRAWLOG	diagnostic	`=<n>[:<seconds>]` logs the first `<n>` GL draws after `<seconds>`, each with its framebuffer, viewport, scissor box, program, uniforms, samplers and its vertex attributes' first vertices; `=1` or more also names samplers that have no texture
+DM_GL_FBLOG	diagnostic	`=1` logs every framebuffer bind with its size and the draws so far
 DM_GL_LOG	diagnostic	`=1` makes the GL layer log object creation
+DM_GL_MISSES	diagnostic	`=1` reports each `eglGetProcAddress` name the layer lacks when the game first asks for it
 DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that reports its first call and returns 0, instead of a null pointer (bring-up)
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
@@ -90,6 +94,12 @@ DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exc
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
 DM_METAL_SHADER_MODE	diagnostic	`=jit` keeps Mac MSL source for runtime compilation; `=precompiled` packages Mac metallibs (default)
+DM_MOTION	switch	`0` ignores live motion: every six-axis sensor lies flat as before (a shake still plays), and neither controllers' motion sensors nor the phone's device motion are switched on (`hle_hid.c`, `motion_apple.h`, `DmGamepad.m`); the NSP script's `--no-motion` (`MOTION = False`) builds it in
+DM_MOTION_ACC_SIGN	switch	`-1` flips only GameController's acceleration, for a source that reports the specific force (+1 G up at rest) instead of the gravity direction (`motion_fusion.h`); phone and raw HID samples are already in the Switch frame
+DM_MOTION_AXES	switch	`=<map>` such as `x,-z,y`: maps Apple's controller axes to the Switch's, a signed permutation applied to acceleration and rotation alike, for a controller whose axes differ (default `x,y,z`; phone and raw HID samples are already in the Switch frame)
+DM_MOTION_GAIN	switch	`=<gain>`: how fast the orientation is pulled toward the measured gravity, in rad/s per unit error (default 0.5; `0` integrates the gyro alone)
+DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller HID motion fallback (`motion_pro_mac.h`); enabled by default when exactly one physical Pro and one GameController Pro can use the same player slot; usable GameController motion takes priority
+DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NICK	switch	The account nickname the game sees (default `Player`)
@@ -108,14 +118,17 @@ DM_NVN_CBLOG	diagnostic	`=1` logs the command memory the game adds to command bu
 DM_NVN_CLEARLOG	diagnostic	`=1` logs the first 40 colour clears drawn as a triangle (inside a pass, with a partial channel mask or a partial scissor)
 DM_NVN_CMDSTAT	diagnostic	`=1` logs every 300 frames the command recording usage: bytes and records per frame, command memory segment sizes, out-of-memory callbacks, host segments, count and bytes per command type
 DM_NVN_COUNT	diagnostic	`1` counts every NVN call (the counting trampolines) and writes the per-frame call lines; off by default (on with a `DM_NVN_TSV` table that has call rows), the count is an atomic add all recording threads share
+DM_NVN_CPUPROF	diagnostic	1 records CPU wall/time/instruction totals by renderer operation; off by default.
 DM_NVN_CSH_PRESCAN	diagnostic	`0` runs the compute-hoist scan at every pass's first draw even when no dispatch follows (as before; for timing)
 DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass end it (on by default: the dispatch runs ahead of the pass when that changes nothing the draws before it read)
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
 DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimizations (which run only with `DM_NVN_TBDR=1`)
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
+DM_NVN_DIRECT_UPLOAD	switch	0 disables bounded direct RGBA16F array uploads and keeps staged copies; on by default for supported non-sparse textures.
 DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed
 DM_NVN_DISPATCH_OWN	switch	`=1` gives every compute dispatch a compute encoder of its own with full barriers, as before (by default dispatches share the copy encoder); `DM_NVN_PASSGPU` does the same
+DM_NVN_DUAL_WANT	path	`=<file>`: appends the key of each pixel shader a pipeline blends with its output 1 as the second source, while it has no dual-source entry point, to that file, once per key (the profile's `dual_want.tsv`)
 DM_NVN_ENC_LABEL	diagnostic	`=1` labels every render encoder `p<pass in frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draws>` for Instruments traces
 DM_NVN_ENC_THREAD	player	`1` runs the replay's Metal encoding on a thread of its own while the submit thread goes on translating; on by default on iOS (`0` turns it off), off on macOS
 DM_NVN_FAST_WAKE	switch	`0` makes the game's `SyncWait`s wake on the commit feedback handler instead of the GPU's own signal of the fence (on by default)
@@ -125,10 +138,13 @@ DM_NVN_FLUSH_FILL	switch	`0` starts a new GPU texture in a CPU-writable pool as 
 DM_NVN_FRAMES	diagnostic	`=<N>` prints the NVN call table frame by frame for the first N frames (default 3)
 DM_NVN_FUSE_CHECK	diagnostic	`=1` checks pass merging in the same frame: renders the merged passes again apart and logs the comparison of the attachments every time
 DM_NVN_GEOMETRY_COLOR	switch	full retains inactive geometry color attachments; default omits them only when attachment bounds and state prove equivalence.
+DM_NVN_GEOMETRY_COMPUTE	diagnostic	split ends the geometry compute encoder after each stage for comparison; default combines compatible stages.
 DM_NVN_GEOMETRY_CUT	switch	0 disables extra segment-cut checks at geometry encoder boundaries; default obeys the existing draw threshold and safety gates there.
 DM_NVN_GEOMETRY_INDEX_CACHE	switch	0 disables exact-byte CPU primitive-map caching; default bounds it to 32 MiB and 4096 entries.
 DM_NVN_GEOMETRY_PACK	diagnostic	legacy uses the serial block-prefix scan for comparison; default fuses small draws and scans large block totals in parallel.
 DM_NVN_GEOMETRY_QUERY_RUN	switch	0 prevents geometry runs across samples-passed query reports/resets; default retains independent captures while queries replay at their raster positions.
+DM_NVN_GEOMETRY_WAIT	diagnostic	always drains before indexed geometry preparation for comparison; default waits only for possible writes to CPU assembly inputs.
+DM_NVN_GEO_HOIST	switch	`0` draws each geometry draw's capture and kernel at its own place, ending the render pass; by default a run of lean geometry draws is prepared before the pass opens and only their rasters are drawn in it (`geo_run_walk`)
 DM_NVN_GEO_LEAN	switch	`0` draws passthrough geometry shaders through their full kernel and reader, as before; by default a lean kernel culls and the program's own vertex shader draws (`nvn_geometry.inc`)
 DM_NVN_GEO_MESH	switch	`0` draws passthrough geometry pairs that have a mesh library (`geo_mesh.tsv`) through the compute path; by default they are mesh draws in the render pass (`geo_mesh_draw`)
 DM_NVN_GEO_MESH_RUN	switch	`0` dispatches every mesh geometry draw on its own; by default consecutive mesh draws of one pair whose result does not depend on their order are drawn as one dispatch (`geo_mesh_take`)
@@ -188,6 +204,7 @@ DM_NVN_UB_N	diagnostic	`=<frames>`: the length of each phase of the same-process
 DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in part ends the pass, as before; by default its shadow starts from memory and takes the submission's queued updates (on by default)
 DM_NVN_UDC_AB	diagnostic	`=1` starts with the DontCare store for unwritten attachments off and turns it on after the second screenshot, for an on/off picture comparison in one run
 DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
+DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
@@ -209,6 +226,7 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
+DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 DM_PICTURE_FIT	player	`fill` scales the 16:9 picture on the iPhone and iPad until it covers the screen in landscape and crops the edges (a portrait or tabletop split and a TV stay fitted); `fit` or unset, the largest 16:9 rectangle with black bars. Launcher and in-game menu setting
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
@@ -256,6 +274,7 @@ DM_PSO_WAITLOG	diagnostic	`=1` logs each draw that waited more than 20 ms for it
 DM_QOS_EDGES	switch	`=e1,e2`: the Switch priority edges of `DM_QOS_MAP` (default `44,59`)
 DM_QOS_MAP	switch	`=1` maps guest thread priority to QoS class: ≤ 44 user-interactive, 45–59 user-initiated, the rest utility (off by default: every guest thread runs user-interactive)
 DM_REC	diagnostic	`=<file>`: writes player 1's physical input (keyboard, mouse touches, controllers; never `DM_KEYS` / `DM_CTL`) to the file as `DM_KEYS` steps in presented frames, for replaying a run (`DM_KEYS=@<file>`)
+DM_REGIONS	diagnostic	`=<file>` writes the table of the SDK's address regions every 2 s (alias offset, size, where the request returns to in the game, bytes mapped, the part opened, the SDK offset the request came through; `hle_svc.c` "Address regions"); the NSP script's address region check sets it
 DM_RENDER_SCALE	player	`0.5` to `1.0`: fixes the game's 3D views at that fraction of their size and turns its dynamic resolution off, for builds with a render scale stub; `1.0` (the default) keeps it
 DM_RESOURCE_AOC	path	The add-on content folder the iOS build copies into the app's `aoc/` (empty for none); written by `gen_resources.py`, read by `stage_resources.sh`
 DM_RESOURCE_BUILD	switch	Package version (for example `v327680`), written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `build=` field of the app's `romfs.id`
@@ -305,6 +324,7 @@ DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); st
 DM_TEST_ARCHIVE_CONSTANTS	test	Use optional function constants in the synthetic pipeline archive restart fixture
 DM_TEST_ARCHIVE_MIXED	test	Mix a newly compiled shader function with compacted bases in the archive restart fixture
 DM_TEST_BORDER	test	Path to the native t_border executable that test_dmsh_border.py runs a rewritten shader through on the GPU (`make check_t_border` sets it)
+DM_TEST_BUILD	test	Build folder of `dm/host/tests` whose `t_svc_memory` `test_memory_profile.py` runs (default `build`; `make asan` sets `build/asan`)
 DM_TEST_FS_FAIL	diagnostic	`=write:<n>[:<errno>]` makes the nth save write fail with that errno (default ENOSPC), which refuses the save transaction's commit
 DM_TEST_FS_FAILAT	diagnostic	`=<point>[:<count>][,…]` makes steps of the save transaction (`mountclone`, `reclone`, `guestname`, `renameback`) fail with ENOSPC
 DM_TEST_GEOMETRY	test	Path of the native `t_geometry` executable; `test_dmsh_geometry.py` runs its native geometry emitter checks only when it is set

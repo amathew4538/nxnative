@@ -1,16 +1,21 @@
 """Function patch recognition through real AArch64 code and synthetic unwind tables.
 No game files. Relocation is accepted; changed logic, callees, ambiguity and wrong
 profile/module selection are refused through the rewriter's actual registry code.
+A patch of several functions applies whole or not at all; the rewriter lists what an
+unregistered build kept, and the NSP script reports it.
 """
 import ast
+import contextlib
 import copy
 import glob
 import importlib.util
+import io
 import os
 from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -91,6 +96,18 @@ class Matching(unittest.TestCase):
         self.assertEqual(moved.match(rule)[0][0], 0x108)
         with self.assertRaisesRegex(MatchError, '0 matching'):
             Image(imported('free'), 0x2000).match(rule)
+
+    def test_system_call_wrapper_is_identified_by_its_number(self):
+        # the SDK's svc wrappers have no unwind entry: `svc #n; ret` stands for call n, and another number is another callee
+        def module(svc, at=0x500):
+            out = image({0x100: caller(0x100, at)})
+            struct.pack_into('<2I', out, at, 0xd4000001 | svc << 5, RET)
+            return out
+        rule = Image(module(0x2c), 0x2000).recipe(0x108, 'e00317aa', 'e0124091', 'heap')
+        self.assertEqual(Image(module(0x2c, 0x700), 0x2000).match(rule)[0][0], 0x108)
+        with self.assertRaisesRegex(MatchError, '0 matching'): Image(module(0x2d), 0x2000).match(rule)
+        longer = module(0x2c); struct.pack_into('<I', longer, 0x504, NOP)   # not a bare wrapper: no identity, no match
+        with self.assertRaisesRegex(MatchError, 'no verified boundary'): Image(longer, 0x2000).fingerprint(0x100)
 
     def test_address_register_clobbers_preserve_member_offsets(self):
         for reg, move in ((8, 0x2a0003e8), (29, 0xaa0003fd)):
@@ -176,8 +193,9 @@ class Matching(unittest.TestCase):
                     ('0100000000000001', 'main', 'ab' * 16, NOP)):
                 with self.subTest(game=gid, module=name, build=bid):
                     img = bytearray(self.original)
+                    out = root / 'out' / gid / name / bid; out.mkdir(parents=True)
                     ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
-                              d=bytes(0x40) + bytes.fromhex(bid), IMG=img, TEXT_END=0x2000, NAME=name)
+                              MOD=SimpleNamespace(build_id=bytes.fromhex(bid)), IMG=img, TEXT_END=0x2000, NAME=name, outdir=str(out))
                     with patch.dict(os.environ, DM_GAME=gid, DM_GAMES_DIR='/derived/profile', DM_GAMES_FIRST='1'):
                         exec(code, ns)
                     self.assertEqual(struct.unpack_from('<I', img, 0x108)[0], expected)

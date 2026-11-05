@@ -11,6 +11,3 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
-
-Games/
-keys/

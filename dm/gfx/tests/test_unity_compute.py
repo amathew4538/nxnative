@@ -1,5 +1,8 @@
 """Stripped ComputeShader objects: legacy kernels, Unity 2021.3 keyword variants and Unity 6000.3 resource types."""
 from pathlib import Path
+import contextlib
+import io
+import json
 import struct
 import sys
 import unittest
