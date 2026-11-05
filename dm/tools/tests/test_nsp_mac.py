@@ -48,6 +48,12 @@ class Base(unittest.TestCase):
             log.write_text('shaders 1: ok 1\n')
 
 
+class CommandLine(unittest.TestCase):
+    def test_metal_shader_mode_option(self):
+        args = nsp.parse_args(['--metal-shaders', 'jit'])
+        self.assertEqual(args.metal_shaders, 'jit')
+
+
 class Layer(Base):
     def vk(self, mac, key='K'):
         self.ran.clear()
